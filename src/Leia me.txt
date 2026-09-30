@@ -1,0 +1,35 @@
+BR SISLOJA — FASE 1 (PDV + Produtos & Estoque)
+
+1) BANCO (Supabase)
+   - Use um projeto Supabase NOVO (separado do da igreja).
+   - SQL Editor: cole e rode o schema.sql inteiro.
+   - Authentication > Users: crie o seu usuário (e-mail e senha).
+   - Rode o bloco "PRIMEIRO ACESSO" que está no fim do schema.sql
+     (troque o e-mail e o nome da loja). Sem isso o login entra, mas não enxerga a loja.
+
+2) PROJETO (pasta BR_SISLOJA)
+   - Copie para src/: App.tsx, PdvModule.tsx, ProdutosEstoqueModule.tsx
+     (substitui o App.tsx e o PdvModule.tsx atuais).
+   - Mantenha o seu supabase.ts e o .env, se já funcionam com o projeto novo.
+     O supabase.ts precisa exportar:  export const supabase = createClient(URL, ANON_KEY)
+   - As telas usam Tailwind (classes como "flex", "rounded-xl"). Se o projeto ainda
+     não tem Tailwind, instale antes; sem ele a tela fica sem estilo.
+   - Sem o Tailwind 3.3 ou mais novo, a classe line-clamp-2 não faz efeito
+     (só corta o nome do produto; não quebra nada).
+
+3) USO
+   - Produtos & Estoque: cadastre o produto, o código de barras, as tabelas de preço
+     (ex.: Varejo, Atacado) e lance a entrada de estoque (botão Movimentar).
+   - PDV: leia o código com a câmera (📷), com leitor USB/Bluetooth ou digite.
+     "3*789123" vende 3 unidades. F10 finaliza. Recibo sai pelo navegador.
+
+4) LIMITES DESTA FASE
+   - Leitura por câmera usa o BarcodeDetector do navegador: funciona no Chrome do Android;
+     o Safari do iPhone ainda não tem. Nele, use um leitor Bluetooth ou digite.
+   - A câmera só abre em https (o Vercel já é https).
+   - Impressão: pelo navegador (impressora Wi-Fi comum). Sem impressão direta em térmica ainda.
+   - Nota fiscal (NFC-e / NF-e), nota de entrada por XML, contas a pagar e a receber
+     (tabelas já criadas, telas nas próximas fases) e relatórios financeiros: fases seguintes.
+   - Venda baixa estoque físico e administrativo; o fiscal baixa na emissão da nota (fase fiscal).
+   - Venda no crédito entra em Contas a Receber com vencimento em 30 dias; as demais entram como recebidas.
+   - O servidor recalcula o preço e bloqueia venda sem estoque (configurável na tabela lojas).
