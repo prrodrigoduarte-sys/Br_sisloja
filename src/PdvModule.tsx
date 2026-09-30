@@ -48,6 +48,13 @@ const FORMAS: { id: string; rotulo: string; icone: string }[] = [
 
 const moeda = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const num = (v: string) => Number(String(v).replace(',', '.'));
+const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+// "3*arroz" => 3 unidades de "arroz"
+const separarQtd = (entrada: string) => {
+  const m = entrada.trim().match(/^(\d+(?:[.,]\d+)?)\s*\*\s*(.*)$/);
+  if (m) return { qtd: Number(m[1].replace(',', '.')) || 1, texto: m[2].trim() };
+  return { qtd: 1, texto: entrada.trim() };
+};
 const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 
 // ---------- Leitor por câmera ----------
@@ -212,6 +219,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
 
   const [carrinhoAberto, setCarrinhoAberto] = useState(false);
   const [camera, setCamera] = useState(false);
+  const [idxSel, setIdxSel] = useState(0);
   const [carregando, setCarregando] = useState(true);
   const [salvando, setSalvando] = useState(false);
   const [erro, setErro] = useState('');
@@ -260,14 +268,28 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     [tabelaId, precos]
   );
 
-  // ---- busca ----
+  // ---- busca: nome, SKU ou código de barras (sem depender de acento, várias palavras) ----
+  const { qtd: qtdBusca, texto: textoBusca } = useMemo(() => separarQtd(busca), [busca]);
+
   const filtrados = useMemo(() => {
-    const q = busca.trim().toLowerCase();
-    if (!q) return produtos.slice(0, 60);
-    return produtos
-      .filter((p) => p.nome.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.codigo_barras || '').includes(q))
-      .slice(0, 60);
-  }, [produtos, busca]);
+    const termos = norm(textoBusca).split(/\s+/).filter(Boolean);
+    if (termos.length === 0) return produtos.slice(0, 60);
+    const achados = produtos.filter((p) => {
+      const alvo = norm(p.nome + ' ' + p.sku + ' ' + (p.codigo_barras || ''));
+      return termos.every((t) => alvo.includes(t));
+    });
+    // SKU ou código que começa com o digitado vem primeiro
+    const q = norm(textoBusca);
+    achados.sort((a, b) => {
+      const pa = norm(a.sku).startsWith(q) || (a.codigo_barras || '').startsWith(q) ? 0 : 1;
+      const pb = norm(b.sku).startsWith(q) || (b.codigo_barras || '').startsWith(q) ? 0 : 1;
+      return pa - pb;
+    });
+    return achados.slice(0, 60);
+  }, [produtos, textoBusca]);
+
+  const sugestoes = textoBusca ? filtrados.slice(0, 8) : [];
+  useEffect(() => setIdxSel(0), [textoBusca]);
 
   // ---- carrinho ----
   const adicionar = useCallback(
@@ -299,14 +321,8 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   // código lido (câmera, leitor ou Enter na busca): acha por código de barras ou SKU exato
   const tratarCodigo = useCallback(
     (entrada: string) => {
-      let texto = entrada.trim();
+      const { qtd, texto } = separarQtd(entrada);
       if (!texto) return false;
-      let qtd = 1;
-      const m = texto.match(/^(\d+(?:[.,]\d+)?)\s*\*\s*(.+)$/);
-      if (m) {
-        qtd = num(m[1]);
-        texto = m[2].trim();
-      }
       const t = texto.toLowerCase();
       const achado = produtos.find((p) => (p.codigo_barras && p.codigo_barras === texto) || p.sku.toLowerCase() === t);
       if (achado) {
@@ -318,17 +334,24 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     [produtos, adicionar]
   );
 
+  const escolher = (p: Produto) => {
+    adicionar(p, qtdBusca > 0 ? qtdBusca : 1);
+    setBusca('');
+    setTimeout(() => buscaRef.current?.focus(), 0);
+  };
+
   const aoEnterBusca = () => {
+    // 1) código de barras ou SKU exato entra direto (leitor de código de barras)
     if (tratarCodigo(busca)) {
       setBusca('');
       return;
     }
-    if (filtrados.length === 1) {
-      adicionar(filtrados[0]);
-      setBusca('');
+    // 2) senão, entra a sugestão destacada
+    if (sugestoes.length > 0) {
+      escolher(sugestoes[Math.min(idxSel, sugestoes.length - 1)]);
       return;
     }
-    setAviso(busca.trim() ? 'Código não encontrado. Confira o cadastro do produto.' : '');
+    setAviso(busca.trim() ? 'Nenhum produto encontrado. Confira o cadastro do produto.' : '');
   };
 
   const aoLerCamera = (codigo: string) => {
@@ -439,22 +462,61 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
         </div>
 
         <div className="flex gap-2">
-          <input
-            ref={buscaRef}
-            type="text"
-            inputMode="search"
-            autoFocus
-            value={busca}
-            onChange={(e) => setBusca(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                aoEnterBusca();
-              }
-            }}
-            placeholder="Código de barras, SKU ou nome  (ex.: 3*789123)"
-            className="flex-1 min-w-0 px-3 py-3 rounded-xl border border-slate-300 text-sm outline-none focus:border-blue-700"
-          />
+          <div className="relative flex-1 min-w-0">
+            <input
+              ref={buscaRef}
+              type="text"
+              inputMode="search"
+              autoFocus
+              autoComplete="off"
+              value={busca}
+              onChange={(e) => setBusca(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' && sugestoes.length) {
+                  e.preventDefault();
+                  setIdxSel((i) => Math.min(i + 1, sugestoes.length - 1));
+                } else if (e.key === 'ArrowUp' && sugestoes.length) {
+                  e.preventDefault();
+                  setIdxSel((i) => Math.max(i - 1, 0));
+                } else if (e.key === 'Escape') {
+                  setBusca('');
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  aoEnterBusca();
+                }
+              }}
+              placeholder="Nome, código ou código de barras  (ex.: 3*arroz)"
+              className="w-full px-3 py-3 rounded-xl border border-slate-300 text-sm outline-none focus:border-blue-700"
+            />
+            {sugestoes.length > 0 && (
+              <ul className="absolute left-0 right-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-xl max-h-72 overflow-y-auto divide-y">
+                {sugestoes.map((p, i) => {
+                  const saldo = saldos[p.id] || 0;
+                  return (
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => escolher(p)}
+                        onMouseEnter={() => setIdxSel(i)}
+                        className={`w-full text-left px-3 py-2.5 flex items-center justify-between gap-3 cursor-pointer ${i === idxSel ? 'bg-blue-50' : 'bg-white'}`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[13px] font-bold text-slate-800 truncate">{p.nome}</span>
+                          <span className="block text-[11px] text-slate-500 truncate">
+                            {p.sku}
+                            {p.codigo_barras ? ` · ${p.codigo_barras}` : ''} ·{' '}
+                            <span className={saldo <= 0 ? 'text-rose-600 font-bold' : ''}>{saldo <= 0 ? 'sem estoque' : `estoque ${saldo} ${p.unidade}`}</span>
+                          </span>
+                        </span>
+                        <span className="font-black text-[13px] text-amber-600 whitespace-nowrap">{moeda(precoDe(p))}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setCamera(true)}
