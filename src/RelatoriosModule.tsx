@@ -1,0 +1,397 @@
+// BR Sisloja - Relatórios
+// Estoque valorizado: quantidade × preço de custo e quantidade × preço de venda, por produto, com totais.
+import React, { useEffect, useMemo, useState } from 'react';
+import { supabase } from './supabase';
+
+type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
+
+type Rel = 'estoque';
+const RELATORIOS: { id: Rel; rotulo: string }[] = [{ id: 'estoque', rotulo: '📦 Estoque valorizado' }];
+
+export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }) {
+  const [rel, setRel] = useState<Rel>('estoque');
+  return (
+    <div className="mx-auto max-w-7xl p-3 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center gap-2 print:hidden">
+        <h2 className="mr-auto text-xl font-bold text-gray-800">📊 Relatórios</h2>
+        {RELATORIOS.map((r) => (
+          <button
+            key={r.id}
+            onClick={() => setRel(r.id)}
+            className={`rounded-lg px-3 py-2 text-sm ${rel === r.id ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+          >
+            {r.rotulo}
+          </button>
+        ))}
+      </div>
+      {rel === 'estoque' && <EstoqueValorizado loggedUser={loggedUser} />}
+    </div>
+  );
+}
+
+// =====================================================================
+// ESTOQUE VALORIZADO
+// =====================================================================
+type Linha = {
+  id: string;
+  sku: string;
+  codigo_barras: string | null;
+  nome: string;
+  unidade: string;
+  grupo: string;
+  ativo: boolean;
+  qtd: number;
+  custo: number;
+  preco: number;
+  total_custo: number;
+  total_venda: number;
+  lucro: number;
+  margem: number | null; // % sobre o custo
+};
+
+type Ordem = 'nome' | 'qtd' | 'total_custo' | 'total_venda' | 'lucro' | 'margem';
+
+const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const qtdFmt = (n: number) => n.toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+const pctFmt = (n: number | null) => (n == null ? '—' : n.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%');
+const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+const TIPOS = [
+  { id: 'fisico', rotulo: 'Físico' },
+  { id: 'administrativo', rotulo: 'Administrativo' },
+  { id: 'fiscal', rotulo: 'Fiscal' },
+];
+
+function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
+  const [produtos, setProdutos] = useState<any[]>([]);
+  const [saldos, setSaldos] = useState<Record<string, Record<string, number>>>({});
+  const [tabelas, setTabelas] = useState<{ id: string; nome: string }[]>([]);
+  const [precosTab, setPrecosTab] = useState<Record<string, number>>({}); // `${tabela}|${produto}`
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+
+  const [tipo, setTipo] = useState('fisico');
+  const [tabela, setTabela] = useState('padrao');
+  const [grupo, setGrupo] = useState('');
+  const [busca, setBusca] = useState('');
+  const [mostrar, setMostrar] = useState<'com' | 'todos' | 'negativos'>('com');
+  const [inativos, setInativos] = useState(false);
+  const [porGrupo, setPorGrupo] = useState(false);
+  const [ordem, setOrdem] = useState<Ordem>('nome');
+  const [desc, setDesc] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      const [p, s, t, pp] = await Promise.all([
+        supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo').eq('codigo_loja', loggedUser.codigo_loja).limit(10000),
+        supabase.from('estoque_saldos').select('produto_id, tipo, saldo').eq('codigo_loja', loggedUser.codigo_loja).limit(30000),
+        supabase.from('tabelas_preco').select('id, nome').order('nome'),
+        supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
+      ]);
+      if (p.error || s.error) setErro('Erro ao carregar: ' + (p.error || s.error)!.message);
+      setProdutos(p.data || []);
+      const mapa: Record<string, Record<string, number>> = {};
+      (s.data || []).forEach((x: any) => ((mapa[x.produto_id] ||= {})[x.tipo] = Number(x.saldo) || 0));
+      setSaldos(mapa);
+      setTabelas(t.data || []);
+      const pt: Record<string, number> = {};
+      (pp.data || []).forEach((x: any) => (pt[`${x.tabela_id}|${x.produto_id}`] = Number(x.preco) || 0));
+      setPrecosTab(pt);
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja]);
+
+  const grupos = useMemo(() => Array.from(new Set(produtos.map((p) => p.grupo || '').filter(Boolean))).sort(), [produtos]);
+
+  const linhas: Linha[] = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    const lista = produtos
+      .filter((p) => inativos || p.ativo)
+      .filter((p) => !grupo || (p.grupo || '') === grupo)
+      .filter((p) => !q || p.nome.toLowerCase().includes(q) || String(p.sku).toLowerCase().includes(q) || (p.codigo_barras || '').includes(q))
+      .map((p) => {
+        const qtd = saldos[p.id]?.[tipo] || 0;
+        const custo = Number(p.custo) || 0;
+        const preco = tabela === 'padrao' ? Number(p.preco_venda) || 0 : precosTab[`${tabela}|${p.id}`] ?? (Number(p.preco_venda) || 0);
+        const total_custo = r2(qtd * custo);
+        const total_venda = r2(qtd * preco);
+        return {
+          id: p.id,
+          sku: p.sku,
+          codigo_barras: p.codigo_barras,
+          nome: p.nome,
+          unidade: p.unidade,
+          grupo: p.grupo || '',
+          ativo: p.ativo,
+          qtd,
+          custo,
+          preco,
+          total_custo,
+          total_venda,
+          lucro: r2(total_venda - total_custo),
+          margem: custo > 0 ? r2((preco / custo - 1) * 100) : null,
+        };
+      })
+      .filter((l) => (mostrar === 'todos' ? true : mostrar === 'negativos' ? l.qtd < 0 : l.qtd > 0));
+    const fator = desc ? -1 : 1;
+    return lista.sort((a, b) => {
+      if (ordem === 'nome') return a.nome.localeCompare(b.nome) * fator;
+      return (((a[ordem] ?? -Infinity) as number) - ((b[ordem] ?? -Infinity) as number)) * fator;
+    });
+  }, [produtos, saldos, precosTab, tipo, tabela, grupo, busca, mostrar, inativos, ordem, desc]);
+
+  const totais = useMemo(() => soma(linhas), [linhas]);
+
+  const blocos = useMemo(() => {
+    if (!porGrupo) return [{ grupo: '', linhas }];
+    const m = new Map<string, Linha[]>();
+    linhas.forEach((l) => {
+      const g = l.grupo || 'SEM GRUPO';
+      if (!m.has(g)) m.set(g, []);
+      m.get(g)!.push(l);
+    });
+    return Array.from(m.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([g, ls]) => ({ grupo: g, linhas: ls }));
+  }, [linhas, porGrupo]);
+
+  const ordenar = (o: Ordem) => {
+    if (ordem === o) setDesc(!desc);
+    else {
+      setOrdem(o);
+      setDesc(o !== 'nome');
+    }
+  };
+
+  const nomeTabela = tabela === 'padrao' ? 'Preço padrão' : tabelas.find((t) => t.id === tabela)?.nome || '';
+  const nomeTipo = TIPOS.find((t) => t.id === tipo)?.rotulo || '';
+
+  const exportarCsv = () => {
+    const sep = ';';
+    const n = (v: number) => String(v).replace('.', ',');
+    const cab = ['Código', 'Código de barras', 'Produto', 'Grupo', 'Unidade', 'Quantidade', 'Custo unit.', 'Total custo', 'Preço venda', 'Total venda', 'Lucro bruto', 'Margem %'];
+    const corpo = linhas.map((l) =>
+      [l.sku, l.codigo_barras || '', l.nome, l.grupo, l.unidade, n(l.qtd), n(l.custo), n(l.total_custo), n(l.preco), n(l.total_venda), n(l.lucro), l.margem == null ? '' : n(l.margem)]
+        .map((c) => `"${String(c).replace(/"/g, '""')}"`)
+        .join(sep)
+    );
+    const total = ['', '', 'TOTAL', '', '', n(totais.qtd), '', n(totais.custo), '', n(totais.venda), n(totais.lucro), totais.margem == null ? '' : n(totais.margem)].join(sep);
+    const blob = new Blob(['﻿' + [cab.join(sep), ...corpo, total].join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `estoque-valorizado-${new Date().toLocaleDateString('sv-SE')}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const Th = ({ o, children, direita }: { o?: Ordem; children: React.ReactNode; direita?: boolean }) => (
+    <th
+      onClick={o ? () => ordenar(o) : undefined}
+      className={`p-2 ${direita ? 'text-right' : ''} ${o ? 'cursor-pointer select-none hover:text-gray-900' : ''} whitespace-nowrap`}
+    >
+      {children}
+      {o && ordem === o ? (desc ? ' ▼' : ' ▲') : ''}
+    </th>
+  );
+
+  return (
+    <div className="space-y-3">
+      {/* filtros */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm print:hidden">
+        <label className="flex items-center gap-1">
+          Estoque
+          <select value={tipo} onChange={(e) => setTipo(e.target.value)} className="rounded border px-2 py-1">
+            {TIPOS.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.rotulo}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1">
+          Preço de venda
+          <select value={tabela} onChange={(e) => setTabela(e.target.value)} className="rounded border px-2 py-1">
+            <option value="padrao">Preço padrão</option>
+            {tabelas.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.nome}
+              </option>
+            ))}
+          </select>
+        </label>
+        <select value={grupo} onChange={(e) => setGrupo(e.target.value)} className="rounded border px-2 py-1">
+          <option value="">Todos os grupos</option>
+          {grupos.map((g) => (
+            <option key={g} value={g}>
+              {g}
+            </option>
+          ))}
+        </select>
+        <select value={mostrar} onChange={(e) => setMostrar(e.target.value as any)} className="rounded border px-2 py-1">
+          <option value="com">Só com estoque</option>
+          <option value="todos">Todos os produtos</option>
+          <option value="negativos">Só estoque negativo</option>
+        </select>
+        <label className="flex items-center gap-1 text-xs">
+          <input type="checkbox" checked={porGrupo} onChange={(e) => setPorGrupo(e.target.checked)} /> agrupar por grupo
+        </label>
+        <label className="flex items-center gap-1 text-xs">
+          <input type="checkbox" checked={inativos} onChange={(e) => setInativos(e.target.checked)} /> inativos
+        </label>
+        <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar produto ou código" className="min-w-[160px] flex-1 rounded-lg border px-3 py-1" />
+        <button onClick={exportarCsv} disabled={!linhas.length} className="rounded-lg border px-3 py-1 hover:bg-gray-50 disabled:opacity-40">
+          ⬇ Excel (CSV)
+        </button>
+        <button onClick={() => window.print()} className="rounded-lg border px-3 py-1 hover:bg-gray-50">
+          🖨 Imprimir
+        </button>
+      </div>
+
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      {/* cabeçalho do relatório (aparece também na impressão) */}
+      <div className="rounded-xl bg-white p-4 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h3 className="text-lg font-bold text-gray-800">Estoque valorizado</h3>
+            <p className="text-xs text-gray-500">
+              {loggedUser.loja_nome} · estoque {nomeTipo} · venda pela tabela {nomeTabela}
+              {grupo && ` · grupo ${grupo}`} · {new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <Quadro titulo="Produtos" valor={String(linhas.length)} />
+          <Quadro titulo="Quantidade total" valor={qtdFmt(totais.qtd)} />
+          <Quadro titulo="Qtd × preço de custo" valor={brl(totais.custo)} destaque="text-gray-900" />
+          <Quadro titulo="Qtd × preço de venda" valor={brl(totais.venda)} destaque="text-blue-800" />
+          <Quadro
+            titulo="Lucro bruto potencial"
+            valor={brl(totais.lucro)}
+            sub={totais.margem == null ? '' : `margem média ${pctFmt(totais.margem)} sobre o custo`}
+            destaque={totais.lucro >= 0 ? 'text-green-700' : 'text-red-700'}
+          />
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+        {carregando ? (
+          <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>
+        ) : !linhas.length ? (
+          <p className="p-6 text-center text-sm text-gray-500">Nenhum produto com esses filtros.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b bg-gray-50 text-left text-[11px] uppercase text-gray-600">
+              <tr>
+                <th className="p-2">Código</th>
+                <Th o="nome">Produto</Th>
+                <Th o="qtd" direita>
+                  Qtd
+                </Th>
+                <th className="p-2 text-right whitespace-nowrap">Custo unit.</th>
+                <Th o="total_custo" direita>
+                  Qtd × custo
+                </Th>
+                <th className="p-2 text-right whitespace-nowrap">Preço venda</th>
+                <Th o="total_venda" direita>
+                  Qtd × venda
+                </Th>
+                <Th o="lucro" direita>
+                  Lucro bruto
+                </Th>
+                <Th o="margem" direita>
+                  Margem
+                </Th>
+              </tr>
+            </thead>
+            {blocos.map((b) => {
+              const st = soma(b.linhas);
+              return (
+                <tbody key={b.grupo || 'todos'} className="divide-y">
+                  {porGrupo && (
+                    <tr className="bg-gray-100">
+                      <td colSpan={9} className="p-2 text-xs font-bold uppercase text-gray-700">
+                        {b.grupo}
+                      </td>
+                    </tr>
+                  )}
+                  {b.linhas.map((l) => (
+                    <tr key={l.id} className={l.ativo ? '' : 'opacity-50'}>
+                      <td className="p-2 text-xs text-gray-500 whitespace-nowrap">{l.sku}</td>
+                      <td className="p-2">
+                        <div className="font-medium text-gray-800">{l.nome}</div>
+                        {!porGrupo && l.grupo && <div className="text-[10px] text-gray-400">{l.grupo}</div>}
+                      </td>
+                      <td className={`p-2 text-right whitespace-nowrap ${l.qtd < 0 ? 'font-bold text-red-600' : ''}`}>
+                        {qtdFmt(l.qtd)} <span className="text-[10px] text-gray-400">{l.unidade}</span>
+                      </td>
+                      <td className={`p-2 text-right whitespace-nowrap ${!l.custo ? 'text-amber-600' : 'text-gray-600'}`} title={!l.custo ? 'Produto sem custo' : ''}>
+                        {brl(l.custo)}
+                      </td>
+                      <td className="p-2 text-right font-semibold whitespace-nowrap">{brl(l.total_custo)}</td>
+                      <td className="p-2 text-right text-gray-600 whitespace-nowrap">{brl(l.preco)}</td>
+                      <td className="p-2 text-right font-semibold text-blue-800 whitespace-nowrap">{brl(l.total_venda)}</td>
+                      <td className={`p-2 text-right whitespace-nowrap ${l.lucro < 0 ? 'text-red-600' : 'text-green-700'}`}>{brl(l.lucro)}</td>
+                      <td className={`p-2 text-right whitespace-nowrap ${l.margem != null && l.margem < 0 ? 'text-red-600' : ''}`}>{pctFmt(l.margem)}</td>
+                    </tr>
+                  ))}
+                  {porGrupo && (
+                    <tr className="bg-gray-50 text-xs font-bold">
+                      <td colSpan={2} className="p-2 text-right">
+                        Subtotal {b.grupo}
+                      </td>
+                      <td className="p-2 text-right">{qtdFmt(st.qtd)}</td>
+                      <td />
+                      <td className="p-2 text-right">{brl(st.custo)}</td>
+                      <td />
+                      <td className="p-2 text-right text-blue-800">{brl(st.venda)}</td>
+                      <td className="p-2 text-right">{brl(st.lucro)}</td>
+                      <td className="p-2 text-right">{pctFmt(st.margem)}</td>
+                    </tr>
+                  )}
+                </tbody>
+              );
+            })}
+            <tfoot className="border-t-2 bg-gray-100 text-sm font-bold">
+              <tr>
+                <td colSpan={2} className="p-2 text-right">
+                  TOTAL GERAL
+                </td>
+                <td className="p-2 text-right">{qtdFmt(totais.qtd)}</td>
+                <td />
+                <td className="p-2 text-right">{brl(totais.custo)}</td>
+                <td />
+                <td className="p-2 text-right text-blue-800">{brl(totais.venda)}</td>
+                <td className="p-2 text-right">{brl(totais.lucro)}</td>
+                <td className="p-2 text-right">{pctFmt(totais.margem)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        )}
+      </div>
+      <p className="text-[11px] text-gray-400 print:hidden">
+        Custo = custo atual do cadastro (última entrada, com frete, IPI e ST). Lucro bruto potencial = quanto renderia vender todo o estoque pelo preço
+        escolhido, sem impostos de venda. Clique no título das colunas para ordenar.
+      </p>
+    </div>
+  );
+}
+
+function soma(ls: Linha[]) {
+  const qtd = ls.reduce((s, l) => s + l.qtd, 0);
+  const custo = r2(ls.reduce((s, l) => s + l.total_custo, 0));
+  const venda = r2(ls.reduce((s, l) => s + l.total_venda, 0));
+  const lucro = r2(venda - custo);
+  return { qtd, custo, venda, lucro, margem: custo > 0 ? r2((venda / custo - 1) * 100) : null };
+}
+
+function Quadro({ titulo, valor, sub, destaque }: { titulo: string; valor: string; sub?: string; destaque?: string }) {
+  return (
+    <div className="rounded-lg border border-gray-200 p-3">
+      <div className="text-[11px] font-medium uppercase text-gray-500">{titulo}</div>
+      <div className={`text-lg font-bold ${destaque || 'text-gray-800'}`}>{valor}</div>
+      {sub && <div className="text-[11px] text-gray-500">{sub}</div>}
+    </div>
+  );
+}
