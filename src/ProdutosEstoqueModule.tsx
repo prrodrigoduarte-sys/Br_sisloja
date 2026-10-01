@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
+import { buscarTodos } from './buscarTodos';
 import AjustePrecosModule from './AjustePrecosModule';
 import AjusteEstoqueModule from './AjusteEstoqueModule';
 
@@ -56,6 +57,23 @@ const formVazio = {
   nao_listar_estoque: false,
 };
 
+// valor escondido na lista (custo, estoque fiscal): aparece só ao clicar e esconde de novo no segundo clique
+function Oculto({ texto, mascara }: { texto: string; mascara: string }) {
+  const [ver, setVer] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => setVer((v) => !v)}
+      title={ver ? 'Clique para esconder' : 'Clique para ver'}
+      className={`rounded px-1.5 py-0.5 text-sm cursor-pointer ${ver ? 'font-bold text-slate-800 bg-amber-50' : 'text-slate-400 hover:bg-slate-100'}`}
+    >
+      {ver ? texto : mascara}
+    </button>
+  );
+}
+
+const CustoOculto = ({ valor }: { valor: number }) => <Oculto texto={moeda(valor || 0)} mascara="R$ ••••" />;
+
 export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any }) {
   const codigoLoja: string = loggedUser?.codigo_loja || '';
   const perfil: string = loggedUser?.perfil || '';
@@ -90,11 +108,11 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const carregar = useCallback(async () => {
     setCarregando(true);
     const [p, s, t, pp, nf] = await Promise.all([
-      supabase.from('produtos').select('*').order('nome').limit(10000),
-      supabase.from('estoque_saldos').select('produto_id, tipo, saldo').limit(50000),
+      buscarTodos(() => supabase.from('produtos').select('*').order('nome').order('id')),
+      buscarTodos(() => supabase.from('estoque_saldos').select('produto_id, tipo, saldo').order('produto_id').order('tipo')),
       supabase.from('tabelas_preco').select('id, nome').order('nome'),
-      supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
-      supabase.from('notas_entrada_itens').select('produto_id').limit(50000),
+      buscarTodos(() => supabase.from('precos_produto').select('tabela_id, produto_id, preco').order('produto_id').order('tabela_id')),
+      buscarTodos(() => supabase.from('notas_entrada_itens').select('produto_id').order('id')),
     ]);
     setViaNF(new Set(((nf.data as any[]) || []).map((x) => x.produto_id).filter(Boolean)));
     const mapaPrecos: Record<string, number> = {};
@@ -376,15 +394,17 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <thead>
             <tr className="border-b bg-slate-50 text-[11px] uppercase text-slate-600">
               <th className="p-2">Produto</th>
-              <th className="p-2 text-right">Preço padrão</th>
+              <th className="p-2 text-right" title="Clique no valor para ver o custo">
+                Custo
+              </th>
               {tabelas.map((t) => (
                 <th key={t.id} className="p-2 text-right">
                   {t.nome}
                 </th>
               ))}
               {TIPOS.map((t) => (
-                <th key={t.id} className="p-2 text-right">
-                  {t.rotulo}
+                <th key={t.id} className="p-2 text-right" title={t.id === 'fiscal' ? 'Estoque fiscal: clique no valor para ver' : undefined}>
+                  {t.id === 'fiscal' ? 'EstF' : t.rotulo}
                 </th>
               ))}
               <th className="p-2 text-right">Ações</th>
@@ -413,7 +433,9 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                       {p.nao_listar_estoque ? ' · não circulante (fora do estoque)' : ''}
                     </p>
                   </td>
-                  <td className="p-2 text-right font-bold whitespace-nowrap">{moeda(p.preco_venda)}</td>
+                  <td className="p-2 text-right whitespace-nowrap">
+                    <CustoOculto valor={p.custo} />
+                  </td>
                   {tabelas.map((t) => {
                     const v = precosLista[`${t.id}|${p.id}`];
                     return (
@@ -424,7 +446,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                   })}
                   {TIPOS.map((t) => (
                     <td key={t.id} className={`p-2 text-right whitespace-nowrap ${t.id === 'fisico' && baixo ? 'text-rose-600 font-black' : ''}`}>
-                      {s[t.id] || 0}
+                      {t.id === 'fiscal' ? <Oculto texto={String(s[t.id] || 0)} mascara="••" /> : s[t.id] || 0}
                     </td>
                   ))}
                   <td className="p-2 text-right whitespace-nowrap space-x-1">
