@@ -1,0 +1,201 @@
+-- BR SISLOJA — FASE 4b: tabela de preço POR ITEM na venda + perfis Colaborador e Caixa vendendo
+-- Rode TUDO de uma vez no SQL Editor. Pode rodar mais de uma vez. Não apaga nada.
+
+-- 0) COLABORADOR: para o banco, tem as mesmas permissões do Gerente
+--    (fica de fora só o que exige a senha do administrador: Configurações, registro de atividades,
+--     usuários e exclusão de nota — tudo isso confere "admin" e a senha, não "gerente")
+create or replace function public.meu_perfil()
+returns text
+language sql stable security definer set search_path to 'public' as $function$
+  select case when lower(perfil) = 'colaborador' then 'gerente' else perfil end
+    from public.perfis
+   where user_id = auth.uid() and ativo
+   limit 1
+$function$;
+
+-- 1) cada item vendido guarda por qual tabela saiu o preço
+alter table public.venda_itens add column if not exists tabela_preco_id uuid;
+
+-- 2) venda: a mesma de antes, com 3 mudanças
+--    a) cada item pode ter a sua tabela (item.tabela_id); sem ela vale a tabela da venda (p_tabela)
+--    b) podem vender: admin, gerente, vendedor, colaborador e caixa
+--    c) a venda guarda quem estava logado (created_by)
+create or replace function public.registrar_venda(
+  p_itens jsonb,
+  p_forma text,
+  p_recebido numeric default null,
+  p_desconto numeric default 0,
+  p_tabela uuid default null,
+  p_cliente uuid default null,
+  p_operador text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+  v_loja text := public.minha_loja();
+  v_neg boolean;
+  v_item jsonb;
+  v_prod public.produtos%rowtype;
+  v_qtd numeric;
+  v_preco numeric;
+  v_tab uuid;
+  v_saldo numeric;
+  v_subtotal numeric := 0;
+  v_total numeric;
+  v_troco numeric := 0;
+  v_venda public.vendas%rowtype;
+  v_linhas jsonb := '[]'::jsonb;
+begin
+  if v_loja is null then
+    raise exception 'Usuário sem loja';
+  end if;
+  if lower(coalesce(public.meu_perfil(), '')) not in ('admin', 'gerente', 'vendedor', 'colaborador', 'caixa') then
+    raise exception 'Sem permissão para vender';
+  end if;
+  if p_itens is null or jsonb_array_length(p_itens) = 0 then
+    raise exception 'Venda sem itens';
+  end if;
+  if p_forma not in ('dinheiro', 'pix', 'cartao_credito', 'cartao_debito') then
+    raise exception 'Forma de pagamento inválida';
+  end if;
+  if coalesce(p_desconto, 0) < 0 then
+    raise exception 'Desconto inválido';
+  end if;
+
+  select coalesce(permite_estoque_negativo, false) into v_neg from public.lojas where codigo_loja = v_loja;
+
+  -- 1) confere itens, preço (pela tabela do item) e estoque (trava a linha do saldo)
+  for v_item in select * from jsonb_array_elements(p_itens) loop
+    v_qtd := (v_item->>'quantidade')::numeric;
+    if v_qtd is null or v_qtd <= 0 then
+      raise exception 'Quantidade inválida';
+    end if;
+
+    select * into v_prod from public.produtos
+     where id = (v_item->>'produto_id')::uuid and codigo_loja = v_loja and ativo;
+    if not found then
+      raise exception 'Produto não encontrado ou inativo';
+    end if;
+
+    -- tabela do item; se não vier, a da venda
+    v_tab := coalesce(nullif(v_item->>'tabela_id', '')::uuid, p_tabela);
+    if v_tab is not null and not exists (select 1 from public.tabelas_preco where id = v_tab and codigo_loja = v_loja) then
+      v_tab := null;
+    end if;
+
+    v_preco := null;
+    if v_tab is not null then
+      select preco into v_preco from public.precos_produto where tabela_id = v_tab and produto_id = v_prod.id;
+    end if;
+    if v_preco is null then
+      v_tab := null; -- produto sem preço nessa tabela: sai pelo preço padrão
+    end if;
+    v_preco := coalesce(v_preco, v_prod.preco_venda);
+
+    select saldo into v_saldo from public.estoque_saldos where produto_id = v_prod.id and tipo = 'fisico' for update;
+    v_saldo := coalesce(v_saldo, 0);
+    if not v_neg and v_saldo < v_qtd then
+      raise exception 'Estoque insuficiente de "%": disponível %, pedido %', v_prod.nome, v_saldo, v_qtd;
+    end if;
+
+    v_subtotal := v_subtotal + round(v_preco * v_qtd, 2);
+    v_linhas := v_linhas || jsonb_build_array(jsonb_build_object(
+      'produto_id', v_prod.id,
+      'nome', v_prod.nome,
+      'quantidade', v_qtd,
+      'preco', v_preco,
+      'custo', v_prod.custo,
+      'tabela_id', v_tab,
+      'subtotal', round(v_preco * v_qtd, 2)));
+  end loop;
+
+  v_total := greatest(v_subtotal - coalesce(p_desconto, 0), 0);
+  if p_forma = 'dinheiro' then
+    if p_recebido is null or p_recebido < v_total then
+      raise exception 'Valor recebido menor que o total';
+    end if;
+    v_troco := p_recebido - v_total;
+  end if;
+
+  -- 2) grava venda e itens
+  insert into public.vendas (codigo_loja, cliente_id, tabela_preco_id, subtotal, desconto, total, forma_pagamento,
+                             valor_recebido, troco, operador, created_by)
+  values (v_loja, p_cliente, p_tabela, v_subtotal, coalesce(p_desconto, 0), v_total, p_forma,
+          p_recebido, v_troco, p_operador, auth.uid())
+  returning * into v_venda;
+
+  for v_item in select * from jsonb_array_elements(v_linhas) loop
+    insert into public.venda_itens (codigo_loja, venda_id, produto_id, nome, quantidade, preco_unitario, custo_unitario,
+                                    subtotal, tabela_preco_id)
+    values (v_loja, v_venda.id, (v_item->>'produto_id')::uuid, v_item->>'nome', (v_item->>'quantidade')::numeric,
+            (v_item->>'preco')::numeric, (v_item->>'custo')::numeric, (v_item->>'subtotal')::numeric,
+            nullif(v_item->>'tabela_id', '')::uuid);
+
+    -- venda baixa o estoque físico e o administrativo; o fiscal baixa na emissão da nota (fase fiscal)
+    perform public._mov_estoque(v_loja, (v_item->>'produto_id')::uuid, 'fisico', -(v_item->>'quantidade')::numeric, 'venda',
+                                (v_item->>'custo')::numeric, 'Venda #' || v_venda.numero, 'venda', v_venda.id);
+    perform public._mov_estoque(v_loja, (v_item->>'produto_id')::uuid, 'administrativo', -(v_item->>'quantidade')::numeric, 'venda',
+                                (v_item->>'custo')::numeric, 'Venda #' || v_venda.numero, 'venda', v_venda.id);
+  end loop;
+
+  -- 3) financeiro: dinheiro/pix/débito entram como recebido; crédito fica a receber em 30 dias
+  insert into public.contas_receber (codigo_loja, cliente_id, descricao, valor, vencimento, status, forma, data_recebimento, origem, origem_id)
+  values (v_loja, p_cliente, 'Venda PDV #' || v_venda.numero, v_total,
+          case when p_forma = 'cartao_credito' then current_date + 30 else current_date end,
+          case when p_forma = 'cartao_credito' then 'aberto' else 'recebido' end,
+          p_forma,
+          case when p_forma = 'cartao_credito' then null else current_date end,
+          'venda', v_venda.id);
+
+  return jsonb_build_object('id', v_venda.id, 'numero', v_venda.numero, 'total', v_total, 'troco', v_troco);
+end
+$function$;
+
+-- 3) Usuários: o administrador pode escolher também Colaborador (e Vendedor, dos cadastros antigos)
+create or replace function public.admin_salvar_usuario(p_user_id uuid, p_nome text, p_perfil text, p_ativo boolean)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  v_loja text := public.minha_loja();
+  v_perfil text := lower(trim(coalesce(p_perfil, '')));
+  v_atual public.perfis%rowtype;
+begin
+  if coalesce(lower(public.meu_perfil()), '') <> 'admin' then
+    raise exception 'Somente o administrador';
+  end if;
+  if v_perfil not in ('admin', 'gerente', 'financeiro', 'estoquista', 'colaborador', 'caixa', 'vendedor') then
+    raise exception 'Perfil inválido';
+  end if;
+  if length(trim(coalesce(p_nome, ''))) < 2 then
+    raise exception 'Informe o nome do usuário';
+  end if;
+  if not exists (select 1 from auth.users where id = p_user_id) then
+    raise exception 'Login não encontrado';
+  end if;
+
+  select * into v_atual from public.perfis where user_id = p_user_id;
+  if v_atual.user_id is not null and v_atual.codigo_loja <> v_loja then
+    raise exception 'Este login pertence a outra loja';
+  end if;
+
+  if (v_perfil <> 'admin' or not p_ativo)
+     and v_atual.user_id is not null and lower(v_atual.perfil) = 'admin' and v_atual.ativo
+     and not exists (select 1 from public.perfis
+                      where codigo_loja = v_loja and lower(perfil) = 'admin' and ativo and user_id <> p_user_id) then
+    raise exception 'A loja precisa de pelo menos um administrador ativo';
+  end if;
+
+  if v_atual.user_id is null then
+    insert into public.perfis (user_id, codigo_loja, nome, perfil, ativo)
+    values (p_user_id, v_loja, trim(p_nome), v_perfil, coalesce(p_ativo, true));
+  else
+    update public.perfis set nome = trim(p_nome), perfil = v_perfil, ativo = coalesce(p_ativo, true)
+     where user_id = p_user_id;
+  end if;
+end;
+$$;
+
+notify pgrst, 'reload schema';
