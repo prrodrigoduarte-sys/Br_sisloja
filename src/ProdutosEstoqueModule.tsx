@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
+import AjustePrecosModule from './AjustePrecosModule';
 
 // Produtos, tabelas de preço e estoque (físico / fiscal / administrativo).
 // Quem altera saldo é sempre a função movimentar_estoque do banco (fica registrado no histórico).
@@ -64,6 +65,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [soBaixo, setSoBaixo] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [msg, setMsg] = useState('');
+  const [ajustandoPrecos, setAjustandoPrecos] = useState(false);
 
   // modal produto
   const [modalProduto, setModalProduto] = useState(false);
@@ -262,6 +264,18 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
     carregar();
   };
 
+  if (ajustandoPrecos) {
+    return (
+      <AjustePrecosModule
+        loggedUser={loggedUser}
+        aoVoltar={() => {
+          setAjustandoPrecos(false);
+          carregar();
+        }}
+      />
+    );
+  }
+
   const campo = 'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-700';
   const rotulo = 'block text-[11px] font-bold text-slate-500 mb-1';
 
@@ -272,11 +286,20 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <h2 className="text-lg font-black text-slate-800">📦 Produtos & Estoque</h2>
           <p className="text-xs text-slate-500">Valor do estoque (administrativo, a custo): <strong>{moeda(valorEstoque)}</strong></p>
         </div>
-        {podeCadastrar && (
-          <button type="button" onClick={abrirNovo} className="px-4 py-2.5 bg-blue-900 text-white rounded-xl font-bold text-sm cursor-pointer">
-            + Novo produto
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setAjustandoPrecos(true)}
+            className="px-4 py-2.5 bg-amber-100 text-amber-900 rounded-xl font-bold text-sm cursor-pointer"
+          >
+            💲 Ajuste de preços
           </button>
-        )}
+          {podeCadastrar && (
+            <button type="button" onClick={abrirNovo} className="px-4 py-2.5 bg-blue-900 text-white rounded-xl font-bold text-sm cursor-pointer">
+              + Novo produto
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 items-center">
