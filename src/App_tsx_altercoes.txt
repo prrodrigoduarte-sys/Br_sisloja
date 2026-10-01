@@ -1,0 +1,43 @@
+ALTERAÇÕES NO App.tsx (Fase 2)
+==============================
+
+São 4 trocas pequenas. Use Ctrl+F no StackBlitz para achar cada trecho.
+
+------------------------------------------------------------
+1) No topo do arquivo, logo abaixo da linha
+   import ProdutosEstoqueModule from './ProdutosEstoqueModule';
+   ACRESCENTE estas duas linhas:
+------------------------------------------------------------
+import FornecedoresModule from './FornecedoresModule';
+import NotaEntradaModule from './NotaEntradaModule';
+
+------------------------------------------------------------
+2) TROQUE a linha
+   type Aba = 'pdv' | 'produtos';
+   POR:
+------------------------------------------------------------
+type Aba = 'pdv' | 'produtos' | 'fornecedores' | 'entrada';
+
+------------------------------------------------------------
+3) TROQUE o bloco inteiro que começa com  const ABAS  e o  const EM_BREVE  logo abaixo
+   POR:
+------------------------------------------------------------
+const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
+  { id: 'pdv', rotulo: 'PDV', icone: '🛒' },
+  { id: 'produtos', rotulo: 'Produtos & Estoque', icone: '📦' },
+  { id: 'entrada', rotulo: 'Nota de Entrada', icone: '🧾' },
+  { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
+];
+
+const EM_BREVE = ['Contas a Pagar', 'Contas a Receber', 'Nota Fiscal', 'Financeiro'];
+
+------------------------------------------------------------
+4) Procure a linha que mostra o módulo de produtos. Ela é parecida com:
+   {aba === 'produtos' && <ProdutosEstoqueModule loggedUser={usuario} />}
+   LOGO ABAIXO dela, ACRESCENTE:
+------------------------------------------------------------
+{aba === 'entrada' && <NotaEntradaModule loggedUser={usuario} />}
+{aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
+
+(Se a linha de produtos usar outro nome no lugar de "usuario", use o mesmo
+nome que ela usa. Se não achar, me mande o final do App.tsx que eu ajusto.)
