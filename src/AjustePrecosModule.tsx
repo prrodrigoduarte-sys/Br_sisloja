@@ -4,6 +4,7 @@
 // Toda alteração fica no Registro de atividades (Configurações).
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
+import { buscarTodos } from './buscarTodos';
 
 type Produto = {
   id: string;
@@ -85,9 +86,9 @@ export default function AjustePrecosModule({ loggedUser, aoVoltar }: { loggedUse
   const carregar = async () => {
     setCarregando(true);
     const [p, t, pp] = await Promise.all([
-      supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo').order('nome').limit(10000),
+      buscarTodos(() => supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo').order('nome').order('id')),
       supabase.from('tabelas_preco').select('id, nome').order('nome'),
-      supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
+      buscarTodos(() => supabase.from('precos_produto').select('tabela_id, produto_id, preco').order('produto_id').order('tabela_id')),
     ]);
     if (p.error) setMsg({ tipo: 'erro', texto: 'Erro ao carregar: ' + p.error.message });
     const lista = ((p.data as any[]) || []).map((x) => ({ ...x, custo: Number(x.custo) || 0, preco_venda: Number(x.preco_venda) || 0 }));
