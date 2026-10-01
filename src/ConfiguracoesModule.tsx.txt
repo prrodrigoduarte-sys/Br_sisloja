@@ -1,0 +1,209 @@
+// BR Sisloja - Configurações (só administrador)
+// Registro de atividades: toda alteração e exclusão feita no sistema, com quem fez, quando e o que mudou.
+import React, { useEffect, useMemo, useState } from 'react';
+import { supabase } from './supabase';
+
+type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
+
+type Registro = {
+  id: number;
+  usuario: string | null;
+  acao: string;
+  tabela: string | null;
+  registro_id: string | null;
+  descricao: string | null;
+  motivo: string | null;
+  antes: Record<string, any> | null;
+  depois: Record<string, any> | null;
+  created_at: string;
+};
+
+const TABELAS: Record<string, string> = {
+  contas_pagar: 'Contas a pagar',
+  contas_receber: 'Contas a receber',
+  fornecedores: 'Fornecedores',
+  produtos: 'Produtos',
+  precos_produto: 'Preços',
+  tabelas_preco: 'Tabelas de preço',
+  margens_lucro: 'Margens de lucro',
+  notas_entrada: 'Notas de entrada',
+  perfis: 'Usuários',
+  lojas: 'Loja',
+  clientes: 'Clientes',
+};
+
+const ACOES: Record<string, { rotulo: string; cor: string }> = {
+  alteracao: { rotulo: 'Alterou', cor: 'bg-blue-100 text-blue-800' },
+  exclusao: { rotulo: 'Excluiu', cor: 'bg-red-100 text-red-800' },
+  exclusao_nota_entrada: { rotulo: 'Excluiu nota de entrada', cor: 'bg-red-600 text-white' },
+};
+
+// campos internos que não interessam na comparação
+const IGNORAR = new Set(['updated_at', 'created_at', 'xml']);
+
+const dataHora = (s: string) => new Date(s).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' });
+const hoje = () => new Date().toLocaleDateString('sv-SE');
+const valorTexto = (v: any) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+
+// resumo de qual registro foi mexido
+function titulo(r: Registro) {
+  const x = r.depois || r.antes || {};
+  return r.descricao || x.descricao || x.nome || x.razao_social || (x.numero ? `NF ${x.numero}` : '') || r.registro_id || '';
+}
+
+function diferencas(r: Registro) {
+  const a = r.antes || {};
+  const d = r.depois || {};
+  const campos = Array.from(new Set([...Object.keys(a), ...Object.keys(d)])).filter((c) => !IGNORAR.has(c));
+  if (!r.depois) return campos.map((c) => ({ campo: c, antes: a[c], depois: undefined }));
+  return campos.filter((c) => JSON.stringify(a[c]) !== JSON.stringify(d[c])).map((c) => ({ campo: c, antes: a[c], depois: d[c] }));
+}
+
+export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuario }) {
+  const ehAdmin = (loggedUser?.perfil || '').toLowerCase() === 'admin';
+  if (!ehAdmin) return <p className="p-6 text-center text-sm text-gray-500">Somente o administrador acessa as Configurações.</p>;
+
+  return (
+    <div className="mx-auto max-w-7xl p-3 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <h2 className="mr-auto text-xl font-bold text-gray-800">⚙️ Configurações</h2>
+        <span className="rounded-lg bg-gray-800 px-3 py-2 text-sm text-white">📜 Registro de atividades</span>
+      </div>
+      <RegistroAtividades loggedUser={loggedUser} />
+    </div>
+  );
+}
+
+function RegistroAtividades({ loggedUser }: { loggedUser: Usuario }) {
+  const [lista, setLista] = useState<Registro[]>([]);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+  const [de, setDe] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toLocaleDateString('sv-SE');
+  });
+  const [ate, setAte] = useState(hoje());
+  const [tabela, setTabela] = useState('');
+  const [acao, setAcao] = useState('');
+  const [busca, setBusca] = useState('');
+  const [aberto, setAberto] = useState<number | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      setErro('');
+      let q = supabase
+        .from('auditoria')
+        .select('*')
+        .eq('codigo_loja', loggedUser.codigo_loja)
+        .gte('created_at', new Date(de + 'T00:00:00').toISOString()) // meia-noite no horário do computador
+        .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString());
+      if (tabela) q = q.eq('tabela', tabela);
+      if (acao) q = q.eq('acao', acao);
+      const { data, error } = await q.order('created_at', { ascending: false }).limit(1000);
+      if (error)
+        setErro(
+          error.message.includes('auditoria')
+            ? 'O registro de atividades ainda não foi criado no banco: rode o arquivo fase3_auditoria.sql no SQL Editor do Supabase.'
+            : 'Erro: ' + error.message
+        );
+      setLista((data as Registro[]) || []);
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja, de, ate, tabela, acao]);
+
+  const filtrados = useMemo(() => {
+    const t = busca.trim().toLowerCase();
+    if (!t) return lista;
+    return lista.filter((r) => [r.usuario, titulo(r), r.motivo, r.descricao].some((x) => (x || '').toLowerCase().includes(t)));
+  }, [lista, busca]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm">
+        de <input type="date" value={de} onChange={(e) => setDe(e.target.value)} className="rounded border px-2 py-1" />
+        até <input type="date" value={ate} onChange={(e) => setAte(e.target.value)} className="rounded border px-2 py-1" />
+        <select value={tabela} onChange={(e) => setTabela(e.target.value)} className="rounded border px-2 py-1">
+          <option value="">Tudo</option>
+          {Object.entries(TABELAS).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <select value={acao} onChange={(e) => setAcao(e.target.value)} className="rounded border px-2 py-1">
+          <option value="">Alterações e exclusões</option>
+          {Object.entries(ACOES).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v.rotulo}
+            </option>
+          ))}
+        </select>
+        <input
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+          placeholder="Buscar usuário, produto, motivo…"
+          className="min-w-[180px] flex-1 rounded-lg border px-3 py-1"
+        />
+      </div>
+
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      <div className="rounded-xl bg-white shadow-sm">
+        {carregando ? (
+          <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>
+        ) : !filtrados.length ? (
+          <p className="p-6 text-center text-sm text-gray-500">Nenhuma atividade no período.</p>
+        ) : (
+          filtrados.map((r) => {
+            const a = ACOES[r.acao] || { rotulo: r.acao, cor: 'bg-gray-100 text-gray-700' };
+            const difs = aberto === r.id ? diferencas(r) : [];
+            return (
+              <div key={r.id} className="border-t first:border-t-0">
+                <button
+                  onClick={() => setAberto(aberto === r.id ? null : r.id)}
+                  className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-left text-sm hover:bg-gray-50"
+                >
+                  <span className="w-36 text-xs text-gray-500">{dataHora(r.created_at)}</span>
+                  <span className="w-32 truncate font-medium text-gray-800">{r.usuario || '—'}</span>
+                  <span className={`rounded px-2 py-0.5 text-xs font-medium ${a.cor}`}>{a.rotulo}</span>
+                  <span className="text-xs text-gray-500">{TABELAS[r.tabela || ''] || r.tabela}</span>
+                  <span className="min-w-0 flex-1 truncate text-gray-700">{titulo(r)}</span>
+                  {r.motivo && <span className="truncate text-xs italic text-gray-500">motivo: {r.motivo}</span>}
+                </button>
+                {aberto === r.id && (
+                  <div className="overflow-x-auto bg-gray-50 px-4 py-2">
+                    {r.descricao && <p className="mb-2 text-sm text-gray-700">{r.descricao}</p>}
+                    {difs.length ? (
+                      <table className="text-xs">
+                        <thead className="text-left text-gray-500">
+                          <tr>
+                            <th className="pr-4">Campo</th>
+                            <th className="pr-4">Antes</th>
+                            {r.depois && <th>Depois</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {difs.map((d) => (
+                            <tr key={d.campo} className="border-t align-top">
+                              <td className="py-1 pr-4 font-medium">{d.campo}</td>
+                              <td className="max-w-[360px] break-all py-1 pr-4 text-red-700">{valorTexto(d.antes)}</td>
+                              {r.depois && <td className="max-w-[360px] break-all py-1 text-green-700">{valorTexto(d.depois)}</td>}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="text-xs text-gray-500">Sem detalhes de campos.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
