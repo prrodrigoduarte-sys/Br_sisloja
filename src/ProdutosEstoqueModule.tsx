@@ -20,6 +20,7 @@ interface Produto {
   origem: string | null;
   csosn_cst: string | null;
   ativo: boolean;
+  nao_listar_estoque?: boolean; // item não circulante (uso e consumo, imobilizado...): fora da lista e do valor do estoque
 }
 
 interface TabelaPreco {
@@ -51,6 +52,7 @@ const formVazio = {
   origem: '0',
   csosn_cst: '102',
   ativo: true,
+  nao_listar_estoque: false,
 };
 
 export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any }) {
@@ -63,6 +65,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [tabelas, setTabelas] = useState<TabelaPreco[]>([]);
   const [busca, setBusca] = useState('');
   const [soBaixo, setSoBaixo] = useState(false);
+  const [verNaoCirculantes, setVerNaoCirculantes] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [msg, setMsg] = useState('');
   const [ajustandoPrecos, setAjustandoPrecos] = useState(false);
@@ -111,13 +114,18 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const filtrados = useMemo(() => {
     const q = busca.trim().toLowerCase();
     return produtos.filter((p) => {
+      if (!!p.nao_listar_estoque !== verNaoCirculantes) return false;
       if (soBaixo && !((saldos[p.id]?.fisico || 0) <= p.estoque_minimo)) return false;
       if (!q) return true;
       return p.nome.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.codigo_barras || '').includes(q);
     });
-  }, [produtos, busca, soBaixo, saldos]);
+  }, [produtos, busca, soBaixo, saldos, verNaoCirculantes]);
 
-  const valorEstoque = useMemo(() => produtos.reduce((a, p) => a + (saldos[p.id]?.administrativo || 0) * p.custo, 0), [produtos, saldos]);
+  // item não circulante não entra no valor do estoque
+  const valorEstoque = useMemo(
+    () => produtos.filter((p) => !p.nao_listar_estoque).reduce((a, p) => a + (saldos[p.id]?.administrativo || 0) * p.custo, 0),
+    [produtos, saldos]
+  );
 
   // ---------- produto ----------
   const abrirNovo = () => {
@@ -144,6 +152,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
       origem: p.origem || '',
       csosn_cst: p.csosn_cst || '',
       ativo: p.ativo,
+      nao_listar_estoque: !!p.nao_listar_estoque,
     });
     const { data } = await supabase.from('precos_produto').select('tabela_id, preco').eq('produto_id', p.id);
     const m: Record<string, string> = {};
@@ -179,6 +188,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
       origem: form.origem.trim() || null,
       csosn_cst: form.csosn_cst.trim() || null,
       ativo: form.ativo,
+      nao_listar_estoque: form.nao_listar_estoque,
     };
     let id = editando?.id;
     if (editando) {
@@ -313,6 +323,10 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <input type="checkbox" checked={soBaixo} onChange={(e) => setSoBaixo(e.target.checked)} className="w-4 h-4" />
           Só estoque baixo
         </label>
+        <label className="flex items-center gap-2 text-xs font-bold text-slate-600 cursor-pointer" title="Itens marcados como 'Não listar no estoque'">
+          <input type="checkbox" checked={verNaoCirculantes} onChange={(e) => setVerNaoCirculantes(e.target.checked)} className="w-4 h-4" />
+          Ver só os não circulantes
+        </label>
       </div>
 
       {msg && <div className="text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">{msg}</div>}
@@ -344,6 +358,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                       {p.sku}
                       {p.codigo_barras ? ` · ${p.codigo_barras}` : ''}
                       {!p.ativo ? ' · inativo' : ''}
+                      {p.nao_listar_estoque ? ' · não circulante (fora do estoque)' : ''}
                     </p>
                   </td>
                   <td className="p-2 text-right font-bold whitespace-nowrap">{moeda(p.preco_venda)}</td>
@@ -467,6 +482,22 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
             <label className="flex items-center gap-2 text-sm font-bold text-slate-700 cursor-pointer">
               <input type="checkbox" checked={form.ativo} onChange={(e) => setForm({ ...form, ativo: e.target.checked })} className="w-4 h-4" />
               Produto ativo (aparece no PDV)
+            </label>
+
+            <label className="flex items-start gap-2 text-sm font-bold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.nao_listar_estoque}
+                onChange={(e) => setForm({ ...form, nao_listar_estoque: e.target.checked })}
+                className="w-4 h-4 mt-0.5"
+              />
+              <span>
+                Não listar no estoque (item não circulante)
+                <span className="block text-[11px] font-normal text-slate-500">
+                  Uso e consumo, material de limpeza da loja, embalagem interna, ferramentas, móveis… Não aparece na lista de estoque nem no valor do
+                  estoque, mas as entradas continuam registradas.
+                </span>
+              </span>
             </label>
 
             {msg && <p className="text-xs font-semibold text-rose-700">{msg}</p>}
