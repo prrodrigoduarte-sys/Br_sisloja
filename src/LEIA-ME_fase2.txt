@@ -1,0 +1,64 @@
+BR SISLOJA — FASE 2: MERCADORIAS (Fornecedores + Nota de Entrada por XML)
+=========================================================================
+
+O QUE TEM DE NOVO
+- Fornecedores: cadastro completo. Com o CNPJ digitado, o botão "🔎 Receita" preenche nome e endereço sozinho.
+- Nota de Entrada: escolha o arquivo XML da NF-e e o sistema:
+    * cadastra o fornecedor sozinho se o CNPJ ainda não existir;
+    * acha o produto pelo código do fornecedor (a partir da 2ª nota) ou pelo código de barras;
+    * produto que não existe vira "PRODUTO NOVO" e é cadastrado ao confirmar;
+    * divide frete, seguro, outras despesas, IPI e ST (menos o desconto) no custo de cada item;
+    * calcula o preço de venda: custo final × (1 + margem%), para o Preço padrão e para cada
+      tabela de preço (Varejo, Atacado...). Você pode mudar a margem ou o preço na tela;
+    * caixa com 12, fardo com 6 etc.: informe quantas unidades vêm em cada uma
+      (o sistema já sugere quando o XML traz essa informação);
+    * ao confirmar: lança o estoque (físico, administrativo e fiscal), atualiza custo e preços
+      e gera as contas a pagar pelas parcelas (duplicatas) da nota.
+    * a mesma nota não entra duas vezes (bloqueio pela chave de acesso).
+- Margens de lucro: tabela por grupo de produto (ex.: BEBIDAS, LIMPEZA) e por tabela de preço.
+  Linha "Padrão da loja" vale para quem não tem grupo.
+
+Obs.: puxar a nota direto da SEFAZ só pela chave exige certificado digital. Por enquanto a entrada
+é pelo arquivo XML que o fornecedor manda por e-mail.
+
+-------------------------------------------------------------------------
+PASSO 1 — BANCO DE DADOS (Supabase)
+-------------------------------------------------------------------------
+1. Abra o Supabase, projeto br-sisloja, menu SQL Editor.
+2. Clique em "+ New query".
+3. Abra o arquivo fase2_mercadorias.sql, copie TUDO (Ctrl+A, Ctrl+C) e cole no SQL Editor.
+4. Clique em Run. Deve aparecer "Success. No rows returned".
+   (Não apaga nada da Fase 1. Se rodar duas vezes, não tem problema.)
+
+-------------------------------------------------------------------------
+PASSO 2 — ARQUIVOS NOVOS NO STACKBLITZ (pasta src)
+-------------------------------------------------------------------------
+Para cada arquivo abaixo: clique com o botão direito na pasta "src" > New File,
+digite o nome EXATAMENTE igual, cole o conteúdo do arquivo e salve (Ctrl+S).
+
+   src/nfeXml.ts
+   src/FornecedoresModule.tsx
+   src/NotaEntradaModule.tsx
+
+-------------------------------------------------------------------------
+PASSO 3 — App.tsx
+-------------------------------------------------------------------------
+Siga o arquivo App_tsx_alteracoes.txt (são 4 trocas pequenas). Salve.
+
+-------------------------------------------------------------------------
+PASSO 4 — PRIMEIRO USO
+-------------------------------------------------------------------------
+1. Recarregue o app (Ctrl+Shift+R). Vão aparecer as abas "Nota de Entrada" e "Fornecedores".
+2. Em Nota de Entrada > "% Margens de lucro", preencha a linha "Padrão da loja"
+   (ex.: 60 no Preço padrão e no Varejo, 30 no Atacado) e clique em "Salvar margens".
+   Sem isso, a margem começa em 0% e o preço sugerido sai igual ao custo.
+3. Clique em "+ Importar XML", escolha o XML de uma nota, confira item por item
+   (produto, grupo, unidades por caixa, preços) e clique em "✓ Confirmar entrada".
+
+Quem pode usar:
+- Lançar nota: admin, gerente e estoquista.
+- Alterar margens: admin e gerente.
+- Fornecedores: admin, gerente, estoquista e financeiro.
+
+Sobre o custo: o custo do produto passa a ser o custo final desta nota (já com frete, IPI, ST etc.),
+o mesmo critério da entrada manual da Fase 1.
