@@ -6,8 +6,9 @@ import FornecedoresModule from './FornecedoresModule';
 import EntradaMercadoriaModule from './EntradaMercadoriaModule';
 import FinanceiroModule from './FinanceiroModule';
 import ConfiguracoesModule from './ConfiguracoesModule';
+import RelatoriosModule from './RelatoriosModule';
 
-type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'configuracoes';
+type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'relatorios' | 'configuracoes';
 
 type Usuario = {
   id: string;
@@ -24,12 +25,14 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
   { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
   { id: 'financeiro', rotulo: 'Financeiro', icone: '💰' },
+  { id: 'relatorios', rotulo: 'Relatórios', icone: '📊' },
   { id: 'configuracoes', rotulo: 'Configurações', icone: '⚙️' },
 ];
 
 // abas que só alguns perfis enxergam
 const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
   financeiro: ['admin', 'gerente', 'financeiro'],
+  relatorios: ['admin', 'gerente', 'financeiro'],
   configuracoes: ['admin'],
 };
 
@@ -191,6 +194,7 @@ export default function App() {
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
         {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
         {aba === 'financeiro' && <FinanceiroModule loggedUser={usuario} />}
+        {aba === 'relatorios' && <RelatoriosModule loggedUser={usuario} />}
         {aba === 'configuracoes' && <ConfiguracoesModule loggedUser={usuario} />}
       </main>
     </div>
