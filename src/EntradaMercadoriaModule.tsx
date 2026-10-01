@@ -4,7 +4,7 @@
 // atualiza custo e preços, lança o estoque e gera as contas a pagar das duplicatas.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
-import { lerNfe, Nfe, NfeItem, precoComMargem, margemDoPreco, arred2, arred4 } from './nfeXml';
+import { lerNfe, type Nfe, type NfeItem, precoComMargem, margemDoPreco, arred2, arred4 } from './nfeXml';
 import { formatarDoc } from './FornecedoresModule';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
