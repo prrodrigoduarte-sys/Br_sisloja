@@ -1,0 +1,71 @@
+BR SISLOJA — FASE 3: FINANCEIRO (parte 1: Contas a Pagar)
+=========================================================
+
+O QUE TEM DE NOVO
+- Aba "💰 Financeiro" (só admin, gerente e financeiro enxergam), com 3 partes:
+  Contas a Pagar (pronto), Contas a Receber e Caixa (próxima etapa).
+- Contas a Pagar:
+    * as parcelas (duplicatas) da NF-e continuam entrando sozinhas pela Entrada de Mercadoria;
+    * lista separada por dia de vencimento, com total do dia;
+    * quadros no topo: Vencidas, Vencem hoje, Próximos 7 dias, Total em aberto;
+    * "▥ Ler boleto": passe o leitor ou cole a linha digitável. O sistema lê banco, vencimento e
+      valor, mostra a parcela mais provável (mesmo valor, vencimento mais perto) e liga o boleto a ela.
+      Não deixa o mesmo boleto entrar duas vezes;
+    * "copiar boleto": copia a linha digitável para colar no app do banco;
+    * "Pagar": data, forma, juros/multa e desconto;
+    * "+ Nova conta": contas que não vêm de nota (aluguel, luz, internet), com opção de repetir todo mês;
+    * Pagas / Todas: consulta por período. Admin e gerente podem "Reabrir" uma conta paga ou cancelada.
+
+-------------------------------------------------------------------------
+PASSO 1 — BANCO DE DADOS (Supabase)
+-------------------------------------------------------------------------
+SQL Editor > + New query > cole TODO o fase3_financeiro.sql > Run.
+(Só acrescenta colunas. Não apaga nada. Pode rodar de novo sem problema.)
+
+-------------------------------------------------------------------------
+PASSO 2 — ARQUIVOS NOVOS NO STACKBLITZ (pasta src)
+-------------------------------------------------------------------------
+Botão direito na pasta "src" > New File, nome EXATAMENTE igual, cole o conteúdo, Ctrl+S:
+
+   src/boleto.ts
+   src/ContasPagarModule.tsx
+   src/FinanceiroModule.tsx
+
+-------------------------------------------------------------------------
+PASSO 3 — App.tsx (4 trocas)
+-------------------------------------------------------------------------
+1) Embaixo de   import EntradaMercadoriaModule from './EntradaMercadoriaModule';
+   acrescente:  import FinanceiroModule from './FinanceiroModule';
+
+2) Troque a linha
+     type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores';
+   por
+     type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro';
+
+3) Na lista ABAS, depois da linha de 'fornecedores', acrescente:
+     { id: 'financeiro', rotulo: 'Financeiro', icone: '💰' },
+   e troque a linha do EM_BREVE por:
+     // abas que só alguns perfis enxergam
+     const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
+       financeiro: ['admin', 'gerente', 'financeiro'],
+     };
+
+     const EM_BREVE = ['Nota Fiscal'];
+
+4) Troque   {ABAS.map((a) => (
+   por      {ABAS.filter((a) => !PERFIS_ABA[a.id] || PERFIS_ABA[a.id]!.includes(usuario.perfil.toLowerCase())).map((a) => (
+   e embaixo da linha  {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
+   acrescente:         {aba === 'financeiro' && <FinanceiroModule loggedUser={usuario} />}
+
+(Ou substitua o App.tsx inteiro pelo que vem junto, se o seu estiver igual ao do GitHub.)
+
+-------------------------------------------------------------------------
+OBSERVAÇÕES
+-------------------------------------------------------------------------
+- O XML da NF-e NÃO traz o código de barras do boleto, só as parcelas (nº, vencimento, valor).
+  Por isso o boleto é lido à parte e ligado à parcela.
+- Vencimento do boleto: desde 22/02/2025 o "fator de vencimento" recomeçou do 1000; o sistema já trata.
+- Contas de consumo/tributos (código começando com 8) não trazem vencimento no código:
+  confira a data na hora de lançar.
+- Se aparecer "permission denied" / "row-level security" ao pagar ou lançar, a tabela contas_pagar
+  está sem permissão de alteração para o seu perfil no Supabase: me avise que eu mando o ajuste.
