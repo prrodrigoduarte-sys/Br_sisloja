@@ -26,6 +26,7 @@ interface TabelaPreco {
 interface ItemCarrinho {
   produto: Produto;
   quantidade: number;
+  tabelaId: string; // '' = preço padrão; cada item pode ir por uma tabela diferente
 }
 
 interface VendaFeita {
@@ -204,15 +205,31 @@ ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido</td><td style
 }
 
 // ---------- Tela do PDV ----------
-// preços de cada tabela (Padrão, Varejo, Atacado...) em miniatura; a tabela usada na venda fica destacada
-function PrecosTabelas({ lista, selecionada }: { lista: { id: string; nome: string; preco: number }[]; selecionada: string }) {
+// preços de cada tabela (Padrão, Varejo, Atacado...): tocar numa etiqueta põe o item no carrinho com aquele preço
+function PrecosTabelas({
+  lista,
+  selecionada,
+  aoEscolher,
+}: {
+  lista: { id: string; nome: string; preco: number }[];
+  selecionada: string;
+  aoEscolher?: (tabelaId: string) => void;
+}) {
   if (lista.length < 2) return null;
   return (
     <span className="mt-1 flex flex-wrap gap-1">
       {lista.map((x) => (
         <span
           key={x.id || 'padrao'}
-          className={`rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap ${
+          role={aoEscolher ? 'button' : undefined}
+          title={aoEscolher ? `Vender pelo preço ${x.nome}` : undefined}
+          onMouseDown={(e) => aoEscolher && e.preventDefault()}
+          onClick={(e) => {
+            if (!aoEscolher) return;
+            e.stopPropagation();
+            aoEscolher(x.id);
+          }}
+          className={`rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap ${aoEscolher ? 'cursor-pointer hover:ring-2 hover:ring-amber-400' : ''} ${
             x.id === selecionada ? 'bg-amber-500 text-white font-bold' : 'bg-slate-100 text-slate-600'
           }`}
         >
@@ -282,10 +299,20 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   }, [carregar]);
 
   // ---- preço pela tabela escolhida ----
-  const precoDe = useCallback(
-    (p: Produto) => (tabelaId && precos[tabelaId] && precos[tabelaId][p.id] != null ? precos[tabelaId][p.id] : p.preco_venda),
-    [tabelaId, precos]
+  // preço do produto numa tabela ('' ou sem preço na tabela = preço padrão)
+  const precoTab = useCallback(
+    (p: Produto, tab: string) => (tab && precos[tab] && precos[tab][p.id] != null ? precos[tab][p.id] : p.preco_venda),
+    [precos]
   );
+  const precoDe = useCallback((p: Produto) => precoTab(p, tabelaId), [precoTab, tabelaId]);
+
+  // trocar a tabela no topo muda a venda inteira (cada item ainda pode ser trocado no carrinho)
+  const trocarTabelaGeral = (id: string) => {
+    setTabelaId(id);
+    setCarrinho((prev) => prev.map((x) => ({ ...x, tabelaId: id })));
+  };
+  const trocarTabelaItem = (produtoId: string, id: string) =>
+    setCarrinho((prev) => prev.map((x) => (x.produto.id === produtoId ? { ...x, tabelaId: id } : x)));
 
   // todos os preços do produto (padrão + cada tabela), para mostrar como sugestão
   const precosDe = useCallback(
@@ -320,17 +347,19 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   useEffect(() => setIdxSel(0), [textoBusca]);
 
   // ---- carrinho ----
+  // tab: tabela escolhida na etiqueta; sem ela, usa a tabela do topo
   const adicionar = useCallback(
-    (produto: Produto, qtd = 1) => {
+    (produto: Produto, qtd = 1, tab?: string) => {
       setAviso('');
       setCarrinho((prev) => {
         const i = prev.findIndex((x) => x.produto.id === produto.id);
-        if (i >= 0) return prev.map((x, k) => (k === i ? { ...x, quantidade: x.quantidade + qtd } : x));
-        return [...prev, { produto, quantidade: qtd }];
+        if (i >= 0)
+          return prev.map((x, k) => (k === i ? { ...x, quantidade: x.quantidade + qtd, tabelaId: tab ?? x.tabelaId } : x));
+        return [...prev, { produto, quantidade: qtd, tabelaId: tab ?? tabelaId }];
       });
       if (navigator.vibrate) navigator.vibrate(30);
     },
-    []
+    [tabelaId]
   );
 
   const ajustarQtd = (id: string, delta: number) =>
@@ -362,8 +391,8 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     [produtos, adicionar]
   );
 
-  const escolher = (p: Produto) => {
-    adicionar(p, qtdBusca > 0 ? qtdBusca : 1);
+  const escolher = (p: Produto, tab?: string) => {
+    adicionar(p, qtdBusca > 0 ? qtdBusca : 1, tab);
     setBusca('');
     setTimeout(() => buscaRef.current?.focus(), 0);
   };
@@ -387,7 +416,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   };
 
   // ---- totais ----
-  const subtotal = carrinho.reduce((a, x) => a + precoDe(x.produto) * x.quantidade, 0);
+  const subtotal = carrinho.reduce((a, x) => a + Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100, 0);
   const valorDesconto = Math.min(Math.max(num(desconto) || 0, 0), subtotal);
   const total = Math.max(subtotal - valorDesconto, 0);
   const valorRecebido = num(recebido) || 0;
@@ -408,7 +437,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setSalvando(true);
     setAviso('');
     const { data, error } = await supabase.rpc('registrar_venda', {
-      p_itens: carrinho.map((x) => ({ produto_id: x.produto.id, quantidade: x.quantidade })),
+      p_itens: carrinho.map((x) => ({ produto_id: x.produto.id, quantidade: x.quantidade, tabela_id: x.tabelaId || null })),
       p_forma: forma,
       p_recebido: forma === 'dinheiro' ? valorRecebido : null,
       p_desconto: valorDesconto,
@@ -432,8 +461,8 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       itens: carrinho.map((x) => ({
         nome: x.produto.nome,
         quantidade: x.quantidade,
-        preco: precoDe(x.produto),
-        subtotal: Math.round(precoDe(x.produto) * x.quantidade * 100) / 100,
+        preco: precoTab(x.produto, x.tabelaId),
+        subtotal: Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100,
       })),
       data: new Date().toLocaleString('pt-BR'),
     });
@@ -447,7 +476,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setRecebido('');
     setDesconto('');
     setCarrinhoAberto(false);
-  }, [salvando, carrinho, forma, valorRecebido, total, valorDesconto, tabelaId, operador, precoDe]);
+  }, [salvando, carrinho, forma, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
 
   // atalho F10
   useEffect(() => {
@@ -475,7 +504,8 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
           {tabelas.length > 0 && (
             <select
               value={tabelaId}
-              onChange={(e) => setTabelaId(e.target.value)}
+              onChange={(e) => trocarTabelaGeral(e.target.value)}
+              title="Tabela de preço da venda (muda todos os itens; cada item pode ser trocado no carrinho)"
               className="text-xs font-bold border border-slate-300 rounded-lg px-2 py-1.5 bg-white max-w-[45%]"
               aria-label="Tabela de preço"
             >
@@ -536,7 +566,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
                             {p.codigo_barras ? ` · ${p.codigo_barras}` : ''} ·{' '}
                             <span className={saldo <= 0 ? 'text-rose-600 font-bold' : ''}>{saldo <= 0 ? 'sem estoque' : `estoque ${saldo} ${p.unidade}`}</span>
                           </span>
-                          {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} />}
+                          {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} aoEscolher={(tab) => escolher(p, tab)} />}
                         </span>
                         <span className="font-black text-[13px] text-amber-600 whitespace-nowrap">{moeda(precoDe(p))}</span>
                       </button>
@@ -587,7 +617,16 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
                 </div>
                 <div className="mt-2">
                   <p className="font-black text-[15px] text-amber-600">{moeda(precoDe(p))}</p>
-                  {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} />}
+                  {tabelas.length > 0 && (
+                    <PrecosTabelas
+                      lista={precosDe(p)}
+                      selecionada={tabelaId}
+                      aoEscolher={(tab) => {
+                        adicionar(p, 1, tab);
+                        setBusca('');
+                      }}
+                    />
+                  )}
                 </div>
               </button>
             );
@@ -609,11 +648,28 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
         <div className="flex-1 overflow-y-auto flex flex-col gap-2 min-h-[120px]">
           {carrinho.length === 0 && <p className="text-center text-xs text-slate-400 py-10">Nenhum item. Leia um código ou toque num produto.</p>}
           {carrinho.map((x) => {
-            const preco = precoDe(x.produto);
+            const preco = precoTab(x.produto, x.tabelaId);
+            const opcoes = precosDe(x.produto);
             return (
               <div key={x.produto.id} className="bg-slate-50 rounded-xl p-2.5 text-xs">
                 <div className="flex justify-between gap-2">
-                  <p className="font-bold text-slate-800 leading-tight">{x.produto.nome}</p>
+                  <div className="min-w-0">
+                    <p className="font-bold text-slate-800 leading-tight">{x.produto.nome}</p>
+                    {opcoes.length > 1 && (
+                      <select
+                        value={x.tabelaId}
+                        onChange={(e) => trocarTabelaItem(x.produto.id, e.target.value)}
+                        className="mt-1 rounded border border-amber-300 bg-amber-50 px-1 py-0.5 text-[11px] font-bold text-amber-900"
+                        aria-label="Tabela de preço do item"
+                      >
+                        {opcoes.map((o) => (
+                          <option key={o.id || 'padrao'} value={o.id}>
+                            {o.nome} · {moeda(o.preco)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                   <button type="button" onClick={() => remover(x.produto.id)} className="text-rose-600 font-black cursor-pointer" aria-label="Remover item">
                     ✕
                   </button>
