@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
+import { buscarTodos } from './buscarTodos';
 
 // ------------------------------------------------------------
 // PDV (frente de caixa) — pensado para celular primeiro.
@@ -271,10 +272,10 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setCarregando(true);
     setErro('');
     const [p, s, t, pp] = await Promise.all([
-      supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, preco_venda').eq('ativo', true).order('nome').limit(5000),
-      supabase.from('estoque_saldos').select('produto_id, saldo').eq('tipo', 'fisico').limit(10000),
+      buscarTodos(() => supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, preco_venda').eq('ativo', true).order('nome').order('id')),
+      buscarTodos(() => supabase.from('estoque_saldos').select('produto_id, saldo').eq('tipo', 'fisico').order('produto_id')),
       supabase.from('tabelas_preco').select('id, nome').order('nome'),
-      supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(20000),
+      buscarTodos(() => supabase.from('precos_produto').select('tabela_id, produto_id, preco').order('produto_id').order('tabela_id')),
     ]);
     if (p.error) {
       setErro('Não consegui carregar os produtos: ' + p.error.message);
