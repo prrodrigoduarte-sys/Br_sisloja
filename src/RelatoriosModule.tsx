@@ -28,9 +28,62 @@ export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }
           </button>
         ))}
       </div>
-      {rel === 'estoque' && <EstoqueValorizado loggedUser={loggedUser} />}
+      {rel === 'estoque' && (
+        <ComSenha>
+          <EstoqueValorizado loggedUser={loggedUser} />
+        </ComSenha>
+      )}
       {rel === 'vendas' && <VendasPorUsuario loggedUser={loggedUser} />}
     </div>
+  );
+}
+
+// =====================================================================
+// SENHA SIMPLES para abrir o relatório (tranca de novo ao sair da aba)
+// =====================================================================
+const SENHA_ESTOQUE = '1234';
+
+function ComSenha({ children }: { children: React.ReactNode }) {
+  const [liberado, setLiberado] = useState(false);
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState(false);
+
+  if (liberado) return <>{children}</>;
+
+  const entrar = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (senha === SENHA_ESTOQUE) {
+      setLiberado(true);
+      return;
+    }
+    setErro(true);
+    setSenha('');
+  };
+
+  return (
+    <form onSubmit={entrar} className="mx-auto max-w-xs space-y-3 rounded-xl bg-white p-6 text-center text-sm shadow-sm">
+      <div className="text-3xl">🔒</div>
+      <p className="font-bold text-gray-800">Estoque valorizado</p>
+      <p className="text-gray-500">Digite a senha para abrir.</p>
+      <input
+        type="password"
+        inputMode="numeric"
+        autoFocus
+        autoComplete="off"
+        maxLength={10}
+        value={senha}
+        onChange={(e) => {
+          setSenha(e.target.value);
+          setErro(false);
+        }}
+        className="w-full rounded-lg border px-3 py-2 text-center text-lg tracking-widest"
+        placeholder="••••"
+      />
+      {erro && <p className="text-red-600">Senha incorreta.</p>}
+      <button type="submit" disabled={!senha} className="w-full rounded-lg bg-gray-800 py-2 font-semibold text-white disabled:opacity-40">
+        Abrir
+      </button>
+    </form>
   );
 }
 
