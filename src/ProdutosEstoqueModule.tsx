@@ -63,6 +63,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [saldos, setSaldos] = useState<Record<string, Record<string, number>>>({});
   const [tabelas, setTabelas] = useState<TabelaPreco[]>([]);
+  const [precosLista, setPrecosLista] = useState<Record<string, number>>({}); // `${tabela}|${produto}` -> preço
   const [busca, setBusca] = useState('');
   const [soBaixo, setSoBaixo] = useState(false);
   const [verNaoCirculantes, setVerNaoCirculantes] = useState(false);
@@ -84,11 +85,15 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
 
   const carregar = useCallback(async () => {
     setCarregando(true);
-    const [p, s, t] = await Promise.all([
+    const [p, s, t, pp] = await Promise.all([
       supabase.from('produtos').select('*').order('nome').limit(5000),
       supabase.from('estoque_saldos').select('produto_id, tipo, saldo').limit(20000),
       supabase.from('tabelas_preco').select('id, nome').order('nome'),
+      supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
     ]);
+    const mapaPrecos: Record<string, number> = {};
+    (pp.data || []).forEach((x: any) => (mapaPrecos[`${x.tabela_id}|${x.produto_id}`] = Number(x.preco)));
+    setPrecosLista(mapaPrecos);
     if (p.error) setMsg('Erro ao carregar: ' + p.error.message);
     setProdutos(
       ((p.data as any[]) || []).map((x) => ({
@@ -337,7 +342,12 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <thead>
             <tr className="border-b bg-slate-50 text-[11px] uppercase text-slate-600">
               <th className="p-2">Produto</th>
-              <th className="p-2 text-right">Preço</th>
+              <th className="p-2 text-right">Preço padrão</th>
+              {tabelas.map((t) => (
+                <th key={t.id} className="p-2 text-right">
+                  {t.nome}
+                </th>
+              ))}
               {TIPOS.map((t) => (
                 <th key={t.id} className="p-2 text-right">
                   {t.rotulo}
@@ -362,6 +372,14 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                     </p>
                   </td>
                   <td className="p-2 text-right font-bold whitespace-nowrap">{moeda(p.preco_venda)}</td>
+                  {tabelas.map((t) => {
+                    const v = precosLista[`${t.id}|${p.id}`];
+                    return (
+                      <td key={t.id} className="p-2 text-right whitespace-nowrap text-slate-700">
+                        {v != null ? moeda(v) : <span className="text-slate-300" title="Sem preço nesta tabela: vende pelo preço padrão">—</span>}
+                      </td>
+                    );
+                  })}
                   {TIPOS.map((t) => (
                     <td key={t.id} className={`p-2 text-right whitespace-nowrap ${t.id === 'fisico' && baixo ? 'text-rose-600 font-black' : ''}`}>
                       {s[t.id] || 0}
@@ -384,7 +402,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
             })}
             {!carregando && filtrados.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-slate-500 text-sm">
+                <td colSpan={6 + tabelas.length} className="p-6 text-center text-slate-500 text-sm">
                   Nenhum produto.
                 </td>
               </tr>
