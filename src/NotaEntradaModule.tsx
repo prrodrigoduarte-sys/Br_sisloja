@@ -1,934 +1,797 @@
-// BR Sisloja - Fase 2 - Nota de Entrada por XML (NF-e)
-// Fluxo: escolher o XML -> conferir fornecedor, itens, custos e preços -> confirmar.
-// Ao confirmar (função confirmar_nota_entrada no Supabase): cadastra fornecedor e produtos novos,
-// atualiza custo e preços, lança o estoque e gera as contas a pagar das duplicatas.
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
-import { lerNfe, Nfe, NfeItem, precoComMargem, margemDoPreco, arred2, arred4 } from './nfeXml';
-import { formatarDoc } from './FornecedoresModule';
 
-type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
+// ------------------------------------------------------------
+// PDV (frente de caixa) — pensado para celular primeiro.
+// - Leitor de código de barras: câmera do celular, leitor USB/Bluetooth (digita e dá Enter) ou digitação.
+// - Digite "3*789123" para vender 3 unidades de uma vez.
+// - Preço vem da tabela de preço escolhida; o servidor recalcula tudo e baixa o estoque na mesma transação.
+// - Recibo impresso pelo navegador (vale para impressora Wi-Fi comum: A4 ou etiqueta).
+// ------------------------------------------------------------
 
-type Tabela = { id: string; nome: string };
-type ProdutoRes = {
+interface Produto {
+  id: string;
+  sku: string;
+  codigo_barras: string | null;
+  nome: string;
+  unidade: string;
+  preco_venda: number;
+}
+
+interface TabelaPreco {
   id: string;
   nome: string;
-  codigo_barras: string | null;
-  grupo: string | null;
-  unidade: string | null;
-  custo: number | null;
-  estoque: number | null;
-  precos: Record<string, number>;
-};
-type Margem = { grupo: string; tabela_id: string; margem: number };
-
-type PrecoLinha = { tabela_id: string; margem: number; preco: number; manual: boolean };
-type ItemConf = {
-  nfe: NfeItem;
-  produto: ProdutoRes | null; // produto existente vinculado
-  vinculo: 'fornecedor' | 'ean' | 'manual' | null;
-  novo: boolean; // cadastrar como produto novo
-  nome_novo: string;
-  codigo_barras_novo: string;
-  grupo: string;
-  fator: number; // unidades de venda por unidade da nota
-  atualizar_precos: boolean;
-  precos: PrecoLinha[];
-};
-
-type Preparo = {
-  ja_importada: { id: string; numero: string; data_entrada: string } | null;
-  fornecedor: { id: string; nome: string; nome_fantasia: string | null } | null;
-  loja_cnpj: string | null;
-  tabelas: Tabela[];
-  margem_padrao: number;
-  margens: Margem[];
-  grupos: string[];
-  itens: { idx: number; produto: ProdutoRes | null; fator: number | null; vinculo: 'fornecedor' | 'ean' | null }[];
-};
-
-const brl = (n: number | null | undefined) =>
-  (n ?? 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2 });
-const n4 = (n: number) => (n ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-const dataBR = (s: string) => (s ? s.slice(0, 10).split('-').reverse().join('/') : '');
-const numInput = (s: string) => {
-  const n = parseFloat(String(s).replace(/\./g, '').replace(',', '.'));
-  return isFinite(n) ? n : 0;
-};
-
-function margemPara(prep: Preparo | null, grupo: string, tabela_id: string) {
-  if (!prep) return 0;
-  const g = (grupo || '').trim().toUpperCase();
-  const m =
-    prep.margens.find((x) => (x.grupo || '').toUpperCase() === g && x.tabela_id === tabela_id) ||
-    prep.margens.find((x) => !x.grupo && x.tabela_id === tabela_id);
-  return m ? Number(m.margem) : Number(prep.margem_padrao || 0);
 }
 
-// custo por unidade de venda (custo do item / (quantidade x fator))
-const custoVenda = (it: ItemConf) => {
-  const q = it.nfe.quantidade * (it.fator || 1);
-  return q > 0 ? arred4(it.nfe.custo_total / q) : 0;
+interface ItemCarrinho {
+  produto: Produto;
+  quantidade: number;
+  tabelaId: string; // '' = preço padrão; cada item pode ir por uma tabela diferente
+}
+
+interface VendaFeita {
+  numero: number;
+  total: number;
+  troco: number;
+  forma: string;
+  recebido: number | null;
+  desconto: number;
+  itens: { nome: string; quantidade: number; preco: number; subtotal: number }[];
+  data: string;
+}
+
+const FORMAS: { id: string; rotulo: string; icone: string }[] = [
+  { id: 'dinheiro', rotulo: 'Dinheiro', icone: '💵' },
+  { id: 'pix', rotulo: 'Pix', icone: '⚡' },
+  { id: 'cartao_debito', rotulo: 'Débito', icone: '💳' },
+  { id: 'cartao_credito', rotulo: 'Crédito', icone: '💳' },
+];
+
+const moeda = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const num = (v: string) => Number(String(v).replace(',', '.'));
+const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+// "3*arroz" => 3 unidades de "arroz"
+const separarQtd = (entrada: string) => {
+  const m = entrada.trim().match(/^(\d+(?:[.,]\d+)?)\s*\*\s*(.*)$/);
+  if (m) return { qtd: Number(m[1].replace(',', '.')) || 1, texto: m[2].trim() };
+  return { qtd: 1, texto: entrada.trim() };
 };
+const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 
-function recalcularPrecos(it: ItemConf, prep: Preparo | null, forcar = false): PrecoLinha[] {
-  const custo = custoVenda(it);
-  return (prep?.tabelas || []).map((t) => {
-    const atual = it.precos.find((p) => p.tabela_id === t.id);
-    if (atual?.manual && !forcar) return { ...atual, margem: margemDoPreco(custo, atual.preco) };
-    const margem = atual && !forcar ? atual.margem : margemPara(prep, it.grupo, t.id);
-    return { tabela_id: t.id, margem, preco: precoComMargem(custo, margem), manual: false };
-  });
-}
-
-export default function NotaEntradaModule({ loggedUser }: { loggedUser: Usuario }) {
-  const [tela, setTela] = useState<'lista' | 'conferir' | 'margens'>('lista');
-  const perfil = (loggedUser?.perfil || '').toLowerCase();
-  const podeLancar = ['admin', 'gerente', 'estoquista'].includes(perfil);
-  const podeMargens = ['admin', 'gerente'].includes(perfil);
-
-  return (
-    <div className="mx-auto max-w-7xl p-3 sm:p-6">
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <h2 className="mr-auto text-xl font-bold text-gray-800">🧾 Nota de Entrada</h2>
-        <button
-          onClick={() => setTela('lista')}
-          className={`rounded-lg px-3 py-2 text-sm ${tela === 'lista' ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-        >
-          Notas lançadas
-        </button>
-        {podeMargens && (
-          <button
-            onClick={() => setTela('margens')}
-            className={`rounded-lg px-3 py-2 text-sm ${tela === 'margens' ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-          >
-            % Margens de lucro
-          </button>
-        )}
-        {podeLancar && (
-          <button
-            onClick={() => setTela('conferir')}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-          >
-            + Importar XML
-          </button>
-        )}
-      </div>
-      {tela === 'lista' && <ListaNotas usuario={loggedUser} />}
-      {tela === 'margens' && <Margens usuario={loggedUser} />}
-      {tela === 'conferir' && <Conferencia usuario={loggedUser} aoTerminar={() => setTela('lista')} />}
-    </div>
-  );
-}
-
-// =====================================================================
-// LISTA DE NOTAS LANÇADAS
-// =====================================================================
-function ListaNotas({ usuario }: { usuario: Usuario }) {
-  const [notas, setNotas] = useState<any[]>([]);
-  const [carregando, setCarregando] = useState(true);
-  const [aberta, setAberta] = useState<string | null>(null);
-  const [itens, setItens] = useState<any[]>([]);
+// ---------- Leitor por câmera ----------
+function LeitorCamera({ aoLer, aoFechar }: { aoLer: (codigo: string) => void; aoFechar: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [erro, setErro] = useState('');
+  const [ultimo, setUltimo] = useState('');
+  const aoLerRef = useRef(aoLer);
+  aoLerRef.current = aoLer;
 
   useEffect(() => {
-    (async () => {
-      setCarregando(true);
-      const { data, error } = await supabase
-        .from('notas_entrada')
-        .select('id, numero, serie, chave_acesso, data_emissao, data_entrada, valor_total, qtd_itens, fornecedores(nome, nome_fantasia, cnpj)')
-        .eq('codigo_loja', usuario.codigo_loja)
-        .order('data_entrada', { ascending: false })
-        .limit(200);
-      if (error) setErro(error.message);
-      setNotas(data || []);
-      setCarregando(false);
-    })();
-  }, [usuario.codigo_loja]);
+    let ativo = true;
+    let timer: number | undefined;
+    let stream: MediaStream | null = null;
+    let ultimoCodigo = '';
+    let ultimoMomento = 0;
 
-  const abrir = async (id: string) => {
-    if (aberta === id) return setAberta(null);
-    setAberta(id);
-    setItens([]);
-    const { data } = await supabase.from('notas_entrada_itens').select('*').eq('nota_id', id).order('item');
-    setItens(data || []);
-  };
+    const Detector = (window as any).BarcodeDetector;
+    if (!Detector) {
+      setErro('Este navegador não lê código de barras pela câmera (o Chrome do Android lê). Use um leitor USB/Bluetooth ou digite o código.');
+      return;
+    }
+    const detector = new Detector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'qr_code'] });
 
-  if (carregando) return <p className="p-6 text-center text-gray-500">Carregando...</p>;
-  if (erro) return <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">Erro: {erro}</p>;
-  if (!notas.length)
-    return (
-      <div className="rounded-xl bg-white p-8 text-center text-gray-500 shadow-sm">
-        Nenhuma nota lançada ainda. Clique em <b>+ Importar XML</b> e escolha o arquivo XML da nota do fornecedor.
-      </div>
-    );
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: 'environment' } })
+      .then((s) => {
+        if (!ativo) {
+          s.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        stream = s;
+        const v = videoRef.current;
+        if (!v) return;
+        v.srcObject = s;
+        v.play().catch(() => undefined);
+        const ler = async () => {
+          if (!ativo) return;
+          try {
+            const r = await detector.detect(v);
+            const codigo = r && r[0] && r[0].rawValue;
+            const agora = Date.now();
+            // evita ler o mesmo código várias vezes seguidas
+            if (codigo && (codigo !== ultimoCodigo || agora - ultimoMomento > 2000)) {
+              ultimoCodigo = codigo;
+              ultimoMomento = agora;
+              setUltimo(codigo);
+              aoLerRef.current(codigo);
+            }
+          } catch {
+            /* frame sem código */
+          }
+          timer = window.setTimeout(ler, 250);
+        };
+        ler();
+      })
+      .catch(() => setErro('Não consegui abrir a câmera. Libere a permissão da câmera no navegador (e use o endereço com https).'));
+
+    return () => {
+      ativo = false;
+      if (timer) clearTimeout(timer);
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   return (
-    <div className="space-y-2">
-      {notas.map((n) => (
-        <div key={n.id} className="overflow-hidden rounded-xl bg-white shadow-sm">
-          <button onClick={() => abrir(n.id)} className="flex w-full flex-wrap items-center gap-x-4 gap-y-1 p-3 text-left hover:bg-gray-50">
-            <span className="font-semibold text-gray-800">
-              NF {n.numero}
-              {n.serie ? `-${n.serie}` : ''}
-            </span>
-            <span className="flex-1 truncate text-sm text-gray-600">
-              {n.fornecedores?.nome_fantasia || n.fornecedores?.nome}
-            </span>
-            <span className="text-xs text-gray-500">Emissão {dataBR(n.data_emissao)}</span>
-            <span className="text-xs text-gray-500">Entrada {dataBR(n.data_entrada)}</span>
-            <span className="font-semibold text-gray-800">{brl(n.valor_total)}</span>
+    <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-md bg-white rounded-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b">
+          <h3 className="font-black text-slate-800">📷 Ler código de barras</h3>
+          <button type="button" onClick={aoFechar} className="text-slate-500 font-bold text-xl px-2 cursor-pointer" aria-label="Fechar">
+            ✕
           </button>
-          {aberta === n.id && (
-            <div className="overflow-x-auto border-t bg-gray-50 p-3">
-              <p className="mb-2 font-mono text-[11px] text-gray-500">Chave: {n.chave_acesso}</p>
-              <table className="w-full text-xs">
-                <thead className="text-left text-gray-500">
-                  <tr>
-                    <th className="p-1">#</th>
-                    <th className="p-1">Produto</th>
-                    <th className="p-1 text-right">Qtd</th>
-                    <th className="p-1 text-right">Valor</th>
-                    <th className="p-1 text-right">Custo unit. final</th>
-                    <th className="p-1 text-right">Preço venda</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {itens.map((i) => (
-                    <tr key={i.id} className="border-t">
-                      <td className="p-1">{i.item}</td>
-                      <td className="p-1">{i.descricao}</td>
-                      <td className="p-1 text-right">
-                        {n4(i.quantidade)} {i.unidade}
-                        {Number(i.fator) !== 1 && <span className="text-gray-400"> ×{n4(i.fator)}</span>}
-                      </td>
-                      <td className="p-1 text-right">{brl(i.valor_produtos)}</td>
-                      <td className="p-1 text-right">{brl(i.custo_unitario)}</td>
-                      <td className="p-1 text-right">{i.preco_venda ? brl(i.preco_venda) : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
-      ))}
+        {erro ? (
+          <p className="p-4 text-sm text-rose-700">{erro}</p>
+        ) : (
+          <>
+            <video ref={videoRef} playsInline muted className="w-full aspect-[4/3] bg-black object-cover" />
+            <p className="p-3 text-xs text-slate-500 text-center">
+              Aponte para o código. Cada leitura entra no carrinho.{ultimo && <span className="block font-bold text-slate-700 mt-1">Último: {ultimo}</span>}
+            </p>
+          </>
+        )}
+        <div className="p-3 border-t">
+          <button type="button" onClick={aoFechar} className="w-full py-3 rounded-xl bg-blue-900 text-white font-black cursor-pointer">
+            Concluir
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
 
-// =====================================================================
-// TABELA DE MARGENS DE LUCRO (por grupo e tabela de preço)
-// =====================================================================
-function Margens({ usuario }: { usuario: Usuario }) {
-  const [prep, setPrep] = useState<Preparo | null>(null);
-  const [valores, setValores] = useState<Record<string, string>>({}); // chave `${grupo}|${tabela}`
-  const [grupoNovo, setGrupoNovo] = useState('');
-  const [grupos, setGrupos] = useState<string[]>([]);
-  const [msg, setMsg] = useState('');
-  const [salvando, setSalvando] = useState(false);
+// ---------- Recibo (impressão pelo navegador) ----------
+function imprimirRecibo(v: VendaFeita, loja: string) {
+  const linhas = v.itens
+    .map(
+      (i) =>
+        `<tr><td>${esc(i.nome)}<br><small>${i.quantidade} x ${moeda(i.preco)}</small></td><td style="text-align:right">${moeda(i.subtotal)}</td></tr>`
+    )
+    .join('');
+  const forma = FORMAS.find((f) => f.id === v.forma)?.rotulo || v.forma;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Venda ${v.numero}</title>
+<style>
+@page{margin:8mm}
+body{font-family:Arial,Helvetica,sans-serif;font-size:12px;max-width:320px;margin:0 auto;color:#000}
+h1{font-size:15px;text-align:center;margin:0 0 2px}
+p{margin:2px 0;text-align:center}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+td{padding:3px 0;border-bottom:1px dashed #999;vertical-align:top}
+.tot{font-size:15px;font-weight:bold}
+small{color:#444}
+</style></head><body>
+<h1>${esc(loja)}</h1>
+<p>Comprovante de venda nº ${v.numero}</p>
+<p>${esc(v.data)}</p>
+<p><small>Documento sem valor fiscal</small></p>
+<table>${linhas}</table>
+<table>
+${v.desconto > 0 ? `<tr><td>Desconto</td><td style="text-align:right">- ${moeda(v.desconto)}</td></tr>` : ''}
+<tr class="tot"><td>TOTAL</td><td style="text-align:right">${moeda(v.total)}</td></tr>
+<tr><td>Pagamento</td><td style="text-align:right">${esc(forma)}</td></tr>
+${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido</td><td style="text-align:right">${moeda(v.recebido)}</td></tr><tr><td>Troco</td><td style="text-align:right">${moeda(v.troco)}</td></tr>` : ''}
+</table>
+<p style="margin-top:10px">Obrigado pela preferência!</p>
+</body></html>`;
 
-  const carregar = async () => {
-    const { data, error } = await supabase.rpc('nfe_preparar', {
-      p_codigo_loja: usuario.codigo_loja,
-      p_chave: '',
-      p_cnpj: '',
-      p_itens: [],
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  iframe.style.border = '0';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentWindow?.document;
+  if (!doc || !iframe.contentWindow) return;
+  doc.open();
+  doc.write(html);
+  doc.close();
+  setTimeout(() => {
+    iframe.contentWindow?.focus();
+    iframe.contentWindow?.print();
+    setTimeout(() => iframe.remove(), 2000);
+  }, 250);
+}
+
+// ---------- Tela do PDV ----------
+// preços de cada tabela (Padrão, Varejo, Atacado...): tocar numa etiqueta põe o item no carrinho com aquele preço
+function PrecosTabelas({
+  lista,
+  selecionada,
+  aoEscolher,
+}: {
+  lista: { id: string; nome: string; preco: number }[];
+  selecionada: string;
+  aoEscolher?: (tabelaId: string) => void;
+}) {
+  if (lista.length < 2) return null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1">
+      {lista.map((x) => (
+        <span
+          key={x.id || 'padrao'}
+          role={aoEscolher ? 'button' : undefined}
+          title={aoEscolher ? `Vender pelo preço ${x.nome}` : undefined}
+          onMouseDown={(e) => aoEscolher && e.preventDefault()}
+          onClick={(e) => {
+            if (!aoEscolher) return;
+            e.stopPropagation();
+            aoEscolher(x.id);
+          }}
+          className={`rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap ${aoEscolher ? 'cursor-pointer hover:ring-2 hover:ring-amber-400' : ''} ${
+            x.id === selecionada ? 'bg-amber-500 text-white font-bold' : 'bg-slate-100 text-slate-600'
+          }`}
+        >
+          {x.nome} {moeda(x.preco)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+export default function PdvModule({ loggedUser }: { loggedUser: any }) {
+  const [produtos, setProdutos] = useState<Produto[]>([]);
+  const [saldos, setSaldos] = useState<Record<string, number>>({});
+  const [tabelas, setTabelas] = useState<TabelaPreco[]>([]);
+  const [precos, setPrecos] = useState<Record<string, Record<string, number>>>({});
+  const [tabelaId, setTabelaId] = useState('');
+
+  const [busca, setBusca] = useState('');
+  const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
+  const [forma, setForma] = useState('dinheiro');
+  const [recebido, setRecebido] = useState('');
+  const [desconto, setDesconto] = useState('');
+
+  const [carrinhoAberto, setCarrinhoAberto] = useState(false);
+  const [camera, setCamera] = useState(false);
+  const [idxSel, setIdxSel] = useState(0);
+  const [carregando, setCarregando] = useState(true);
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState('');
+  const [aviso, setAviso] = useState('');
+  const [vendaFeita, setVendaFeita] = useState<VendaFeita | null>(null);
+  const buscaRef = useRef<HTMLInputElement>(null);
+
+  const nomeLoja = loggedUser?.loja_nome || loggedUser?.codigo_loja || 'Loja';
+  const operador = loggedUser?.nome || loggedUser?.email || 'Balcão';
+
+  // ---- carga inicial ----
+  const carregar = useCallback(async () => {
+    setCarregando(true);
+    setErro('');
+    const [p, s, t, pp] = await Promise.all([
+      supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, preco_venda').eq('ativo', true).order('nome').limit(5000),
+      supabase.from('estoque_saldos').select('produto_id, saldo').eq('tipo', 'fisico').limit(10000),
+      supabase.from('tabelas_preco').select('id, nome').order('nome'),
+      supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(20000),
+    ]);
+    if (p.error) {
+      setErro('Não consegui carregar os produtos: ' + p.error.message);
+      setCarregando(false);
+      return;
+    }
+    setProdutos((p.data || []).map((x: any) => ({ ...x, preco_venda: Number(x.preco_venda) })));
+    const mapaSaldo: Record<string, number> = {};
+    (s.data || []).forEach((x: any) => (mapaSaldo[x.produto_id] = Number(x.saldo)));
+    setSaldos(mapaSaldo);
+    setTabelas((t.data as TabelaPreco[]) || []);
+    const mapaPreco: Record<string, Record<string, number>> = {};
+    (pp.data || []).forEach((x: any) => {
+      (mapaPreco[x.tabela_id] ||= {})[x.produto_id] = Number(x.preco);
     });
-    if (error) return setMsg('Erro: ' + error.message);
-    const p = data as Preparo;
-    setPrep(p);
-    const v: Record<string, string> = {};
-    p.margens.forEach((m) => (v[`${(m.grupo || '').toUpperCase()}|${m.tabela_id}`] = String(m.margem).replace('.', ',')));
-    setValores(v);
-    const gs = new Set<string>([...(p.grupos || []), ...p.margens.map((m) => (m.grupo || '').toUpperCase()).filter(Boolean)]);
-    setGrupos(Array.from(gs).sort());
-  };
+    setPrecos(mapaPreco);
+    setCarregando(false);
+  }, []);
 
   useEffect(() => {
     carregar();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [usuario.codigo_loja]);
+  }, [carregar]);
 
-  const salvar = async () => {
-    if (!prep) return;
-    setSalvando(true);
-    setMsg('');
-    const linhas: any[] = [];
-    const apagar: { grupo: string; tabela_id: string }[] = [];
-    for (const g of ['', ...grupos]) {
-      for (const t of prep.tabelas) {
-        const s = (valores[`${g}|${t.id}`] ?? '').trim();
-        if (s === '') apagar.push({ grupo: g, tabela_id: t.id });
-        else linhas.push({ codigo_loja: usuario.codigo_loja, grupo: g, tabela_id: t.id, margem: numInput(s) });
-      }
-    }
-    const { error } = await supabase.from('margens_lucro').upsert(linhas, { onConflict: 'codigo_loja,grupo,tabela_id' });
-    for (const a of apagar) {
-      await supabase.from('margens_lucro').delete().eq('codigo_loja', usuario.codigo_loja).eq('grupo', a.grupo).eq('tabela_id', a.tabela_id);
-    }
-    setSalvando(false);
-    setMsg(error ? 'Erro ao salvar: ' + error.message : 'Margens salvas.');
-    if (!error) carregar();
+  // ---- preço pela tabela escolhida ----
+  // preço do produto numa tabela ('' ou sem preço na tabela = preço padrão)
+  const precoTab = useCallback(
+    (p: Produto, tab: string) => (tab && precos[tab] && precos[tab][p.id] != null ? precos[tab][p.id] : p.preco_venda),
+    [precos]
+  );
+  const precoDe = useCallback((p: Produto) => precoTab(p, tabelaId), [precoTab, tabelaId]);
+
+  // trocar a tabela no topo muda a venda inteira (cada item ainda pode ser trocado no carrinho)
+  const trocarTabelaGeral = (id: string) => {
+    setTabelaId(id);
+    setCarrinho((prev) => prev.map((x) => ({ ...x, tabelaId: id })));
   };
+  const trocarTabelaItem = (produtoId: string, id: string) =>
+    setCarrinho((prev) => prev.map((x) => (x.produto.id === produtoId ? { ...x, tabelaId: id } : x)));
 
-  if (!prep) return <p className="p-6 text-center text-gray-500">{msg || 'Carregando...'}</p>;
-
-  const celula = (g: string, t: Tabela) => (
-    <td key={t.id} className="p-1">
-      <div className="flex items-center gap-1">
-        <input
-          className="w-20 rounded border border-gray-300 px-2 py-1 text-right text-sm"
-          inputMode="decimal"
-          placeholder={g ? 'padrão' : String(prep.margem_padrao)}
-          value={valores[`${g}|${t.id}`] ?? ''}
-          onChange={(e) => setValores((v) => ({ ...v, [`${g}|${t.id}`]: e.target.value }))}
-        />
-        <span className="text-xs text-gray-400">%</span>
-      </div>
-    </td>
+  // todos os preços do produto (padrão + cada tabela), para mostrar como sugestão
+  const precosDe = useCallback(
+    (p: Produto) => [
+      { id: '', nome: 'Padrão', preco: p.preco_venda },
+      ...tabelas.filter((t) => precos[t.id]?.[p.id] != null).map((t) => ({ id: t.id, nome: t.nome, preco: precos[t.id][p.id] })),
+    ],
+    [tabelas, precos]
   );
 
-  return (
-    <div className="rounded-xl bg-white p-4 shadow-sm">
-      <p className="mb-3 text-sm text-gray-600">
-        O preço de venda é calculado assim: <b>custo final do item × (1 + margem%)</b>. O custo final já inclui frete, seguro, IPI, ST e
-        outras despesas da nota, menos o desconto. Grupo sem margem usa a linha <b>Padrão da loja</b>. Deixe vazio para usar o padrão.
-      </p>
-      <div className="overflow-x-auto">
-        <table className="text-sm">
-          <thead className="text-left text-xs uppercase text-gray-500">
-            <tr>
-              <th className="p-1 pr-6">Grupo</th>
-              {prep.tabelas.map((t) => (
-                <th key={t.id} className="p-1">
-                  {t.nome}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="bg-yellow-50">
-              <td className="p-1 pr-6 font-semibold">Padrão da loja</td>
-              {prep.tabelas.map((t) => celula('', t))}
-            </tr>
-            {grupos.map((g) => (
-              <tr key={g} className="border-t">
-                <td className="p-1 pr-6">{g}</td>
-                {prep.tabelas.map((t) => celula(g, t))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <input
-          className="rounded border border-gray-300 px-2 py-1 text-sm"
-          placeholder="Novo grupo (ex.: BEBIDAS)"
-          value={grupoNovo}
-          onChange={(e) => setGrupoNovo(e.target.value.toUpperCase())}
-        />
-        <button
-          onClick={() => {
-            const g = grupoNovo.trim();
-            if (g && !grupos.includes(g)) setGrupos([...grupos, g].sort());
-            setGrupoNovo('');
-          }}
-          className="rounded bg-gray-100 px-3 py-1 text-sm hover:bg-gray-200"
-        >
-          + Adicionar grupo
-        </button>
-        <div className="flex-1" />
-        {msg && <span className="text-sm text-gray-600">{msg}</span>}
-        <button
-          onClick={salvar}
-          disabled={salvando}
-          className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {salvando ? 'Salvando...' : 'Salvar margens'}
-        </button>
-      </div>
-    </div>
-  );
-}
+  // ---- busca: nome, SKU ou código de barras (sem depender de acento, várias palavras) ----
+  const { qtd: qtdBusca, texto: textoBusca } = useMemo(() => separarQtd(busca), [busca]);
 
-// =====================================================================
-// CONFERÊNCIA DA NOTA (depois de escolher o XML)
-// =====================================================================
-function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: () => void }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [nfe, setNfe] = useState<Nfe | null>(null);
-  const [xml, setXml] = useState('');
-  const [prep, setPrep] = useState<Preparo | null>(null);
-  const [itens, setItens] = useState<ItemConf[]>([]);
-  const [erro, setErro] = useState('');
-  const [lendo, setLendo] = useState(false);
-  const [gerarContas, setGerarContas] = useState(true);
-  const [dataEntrada, setDataEntrada] = useState(new Date().toLocaleDateString('sv-SE'));
-  const [confirmando, setConfirmando] = useState(false);
-  const [resultado, setResultado] = useState<any>(null);
-  const [buscaIdx, setBuscaIdx] = useState<number | null>(null);
+  const filtrados = useMemo(() => {
+    const termos = norm(textoBusca).split(/\s+/).filter(Boolean);
+    if (termos.length === 0) return produtos.slice(0, 60);
+    const achados = produtos.filter((p) => {
+      const alvo = norm(p.nome + ' ' + p.sku + ' ' + (p.codigo_barras || ''));
+      return termos.every((t) => alvo.includes(t));
+    });
+    // SKU ou código que começa com o digitado vem primeiro
+    const q = norm(textoBusca);
+    achados.sort((a, b) => {
+      const pa = norm(a.sku).startsWith(q) || (a.codigo_barras || '').startsWith(q) ? 0 : 1;
+      const pb = norm(b.sku).startsWith(q) || (b.codigo_barras || '').startsWith(q) ? 0 : 1;
+      return pa - pb;
+    });
+    return achados.slice(0, 60);
+  }, [produtos, textoBusca]);
 
-  const escolherArquivo = async (arq: File | undefined) => {
-    if (!arq) return;
-    setErro('');
-    setNfe(null);
-    setPrep(null);
-    setLendo(true);
-    try {
-      const texto = await arq.text();
-      const nota = lerNfe(texto);
-      if (nota.modelo && nota.modelo !== '55') throw new Error(`Este XML é do modelo ${nota.modelo}. A entrada aceita NF-e modelo 55.`);
-      const { data, error } = await supabase.rpc('nfe_preparar', {
-        p_codigo_loja: usuario.codigo_loja,
-        p_chave: nota.chave,
-        p_cnpj: nota.emitente.cnpj_cpf,
-        p_itens: nota.itens.map((i, idx) => ({ idx, codigo_fornecedor: i.codigo_fornecedor, ean: i.ean, ean_trib: i.ean_trib })),
+  const sugestoes = textoBusca ? filtrados.slice(0, 8) : [];
+  useEffect(() => setIdxSel(0), [textoBusca]);
+
+  // ---- carrinho ----
+  // tab: tabela escolhida na etiqueta; sem ela, usa a tabela do topo
+  const adicionar = useCallback(
+    (produto: Produto, qtd = 1, tab?: string) => {
+      setAviso('');
+      setCarrinho((prev) => {
+        const i = prev.findIndex((x) => x.produto.id === produto.id);
+        if (i >= 0)
+          return prev.map((x, k) => (k === i ? { ...x, quantidade: x.quantidade + qtd, tabelaId: tab ?? x.tabelaId } : x));
+        return [...prev, { produto, quantidade: qtd, tabelaId: tab ?? tabelaId }];
       });
-      if (error) throw new Error('Erro ao consultar o banco: ' + error.message);
-      const p = data as Preparo;
-      setXml(texto);
-      setNfe(nota);
-      setPrep(p);
-      setItens(
-        nota.itens.map((i, idx) => {
-          const v = p.itens.find((x) => x.idx === idx);
-          const produto = v?.produto || null;
-          const base: ItemConf = {
-            nfe: i,
-            produto,
-            vinculo: produto ? v!.vinculo : null,
-            novo: !produto,
-            nome_novo: i.descricao,
-            codigo_barras_novo: (i.fator_sugerido > 1 ? i.ean_trib : i.ean) || '',
-            grupo: produto?.grupo || '',
-            fator: Number(v?.fator) || i.fator_sugerido || 1,
-            atualizar_precos: true,
-            precos: [],
-          };
-          base.precos = recalcularPrecos(base, p, true);
-          return base;
-        })
-      );
-    } catch (e: any) {
-      setErro(e.message || String(e));
+      if (navigator.vibrate) navigator.vibrate(30);
+    },
+    [tabelaId]
+  );
+
+  const ajustarQtd = (id: string, delta: number) =>
+    setCarrinho((prev) =>
+      prev.map((x) => (x.produto.id === id ? { ...x, quantidade: Math.max(0, Math.round((x.quantidade + delta) * 1000) / 1000) } : x)).filter((x) => x.quantidade > 0)
+    );
+
+  const definirQtd = (id: string, valor: string) => {
+    const n = num(valor);
+    if (!isFinite(n) || n <= 0) return;
+    setCarrinho((prev) => prev.map((x) => (x.produto.id === id ? { ...x, quantidade: n } : x)));
+  };
+
+  const remover = (id: string) => setCarrinho((prev) => prev.filter((x) => x.produto.id !== id));
+
+  // código lido (câmera, leitor ou Enter na busca): acha por código de barras ou SKU exato
+  const tratarCodigo = useCallback(
+    (entrada: string) => {
+      const { qtd, texto } = separarQtd(entrada);
+      if (!texto) return false;
+      const t = texto.toLowerCase();
+      const achado = produtos.find((p) => (p.codigo_barras && p.codigo_barras === texto) || p.sku.toLowerCase() === t);
+      if (achado) {
+        adicionar(achado, qtd > 0 ? qtd : 1);
+        return true;
+      }
+      return false;
+    },
+    [produtos, adicionar]
+  );
+
+  const escolher = (p: Produto, tab?: string) => {
+    adicionar(p, qtdBusca > 0 ? qtdBusca : 1, tab);
+    setBusca('');
+    setTimeout(() => buscaRef.current?.focus(), 0);
+  };
+
+  const aoEnterBusca = () => {
+    // 1) código de barras ou SKU exato entra direto (leitor de código de barras)
+    if (tratarCodigo(busca)) {
+      setBusca('');
+      return;
     }
-    setLendo(false);
-    if (inputRef.current) inputRef.current.value = '';
+    // 2) senão, entra a sugestão destacada
+    if (sugestoes.length > 0) {
+      escolher(sugestoes[Math.min(idxSel, sugestoes.length - 1)]);
+      return;
+    }
+    setAviso(busca.trim() ? 'Nenhum produto encontrado. Confira o cadastro do produto.' : '');
   };
 
-  const alterar = (idx: number, mudanca: Partial<ItemConf>, recalc: 'manter' | 'forcar' | 'nao' = 'manter') => {
-    setItens((lista) =>
-      lista.map((it, i) => {
-        if (i !== idx) return it;
-        const novo = { ...it, ...mudanca };
-        if (recalc !== 'nao') novo.precos = recalcularPrecos(novo, prep, recalc === 'forcar');
-        return novo;
-      })
-    );
+  const aoLerCamera = (codigo: string) => {
+    if (!tratarCodigo(codigo)) setAviso(`Código ${codigo} não encontrado.`);
   };
 
-  const alterarPreco = (idx: number, tabela_id: string, campo: 'margem' | 'preco', valor: number) => {
-    setItens((lista) =>
-      lista.map((it, i) => {
-        if (i !== idx) return it;
-        const custo = custoVenda(it);
-        return {
-          ...it,
-          precos: it.precos.map((p) =>
-            p.tabela_id !== tabela_id
-              ? p
-              : campo === 'margem'
-              ? { ...p, margem: valor, preco: precoComMargem(custo, valor), manual: false }
-              : { ...p, preco: valor, margem: margemDoPreco(custo, valor), manual: true }
-          ),
-        };
-      })
-    );
-  };
+  // ---- totais ----
+  const subtotal = carrinho.reduce((a, x) => a + Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100, 0);
+  const valorDesconto = Math.min(Math.max(num(desconto) || 0, 0), subtotal);
+  const total = Math.max(subtotal - valorDesconto, 0);
+  const valorRecebido = num(recebido) || 0;
+  const troco = forma === 'dinheiro' && valorRecebido > total ? valorRecebido - total : 0;
+  const qtdItens = carrinho.reduce((a, x) => a + x.quantidade, 0);
 
-  const resumo = useMemo(() => {
-    const novos = itens.filter((i) => i.novo).length;
-    const semVinculo = itens.filter((i) => !i.novo && !i.produto).length;
-    const somaDup = arred2((nfe?.duplicatas || []).reduce((s, d) => s + d.valor, 0));
-    return { novos, semVinculo, somaDup };
-  }, [itens, nfe]);
-
-  const confirmar = async () => {
-    if (!nfe || !prep) return;
-    if (resumo.semVinculo) return setErro('Há itens sem produto escolhido. Vincule a um produto ou marque como produto novo.');
-    const semNome = itens.find((i) => i.novo && !i.nome_novo.trim());
-    if (semNome) return setErro(`Informe o nome do produto novo do item ${semNome.nfe.item}.`);
-    if (!window.confirm(`Confirmar a entrada da NF ${nfe.numero}?\n\nO estoque será lançado e ${resumo.novos} produto(s) novo(s) serão cadastrados.`)) return;
-    setConfirmando(true);
-    setErro('');
-    const payload = {
-      codigo_loja: usuario.codigo_loja,
-      chave: nfe.chave,
-      numero: nfe.numero,
-      serie: nfe.serie,
-      modelo: nfe.modelo,
-      data_emissao: nfe.data_emissao || null,
-      data_entrada: dataEntrada,
-      natureza: nfe.natureza,
-      xml,
-      fornecedor: {
-        cnpj_cpf: nfe.emitente.cnpj_cpf,
-        razao_social: nfe.emitente.razao_social,
-        nome_fantasia: nfe.emitente.nome_fantasia,
-        ie: nfe.emitente.ie,
-        crt: nfe.emitente.crt,
-        ...nfe.emitente.endereco,
-      },
-      totais: nfe.totais,
-      gerar_contas: gerarContas,
-      duplicatas: nfe.duplicatas,
-      itens: itens.map((it) => ({
-        item: it.nfe.item,
-        codigo_fornecedor: it.nfe.codigo_fornecedor,
-        ean: it.nfe.ean,
-        ean_trib: it.nfe.ean_trib,
-        descricao: it.nfe.descricao,
-        ncm: it.nfe.ncm,
-        cest: it.nfe.cest,
-        cfop: it.nfe.cfop,
-        origem: it.nfe.origem,
-        unidade: it.nfe.unidade,
-        quantidade: it.nfe.quantidade,
-        fator: it.fator || 1,
-        valor_unitario: it.nfe.valor_unitario,
-        valor_produtos: it.nfe.valor_produtos,
-        frete: it.nfe.frete,
-        seguro: it.nfe.seguro,
-        desconto: it.nfe.desconto,
-        outras: it.nfe.outras,
-        ipi: it.nfe.ipi,
-        st: it.nfe.st,
-        icms: it.nfe.icms,
-        custo_total: it.nfe.custo_total,
-        custo_unitario_final: custoVenda(it),
-        produto_id: it.novo ? null : it.produto?.id,
-        novo_produto: it.novo
-          ? {
-              nome: it.nome_novo.trim(),
-              codigo_barras: it.codigo_barras_novo || null,
-              grupo: it.grupo.trim().toUpperCase() || null,
-              unidade: it.fator > 1 ? it.nfe.unidade_trib || 'UN' : it.nfe.unidade,
-            }
-          : null,
-        atualizar_precos: it.novo || it.atualizar_precos,
-        precos: it.precos.map((p) => ({ tabela_id: p.tabela_id, margem: p.margem, preco: p.preco })),
+  // ---- finalizar ----
+  const finalizar = useCallback(async () => {
+    if (salvando) return;
+    if (carrinho.length === 0) {
+      setAviso('O carrinho está vazio.');
+      return;
+    }
+    if (forma === 'dinheiro' && valorRecebido < total) {
+      setAviso('Informe o valor recebido (igual ou maior que o total).');
+      return;
+    }
+    setSalvando(true);
+    setAviso('');
+    const { data, error } = await supabase.rpc('registrar_venda', {
+      p_itens: carrinho.map((x) => ({ produto_id: x.produto.id, quantidade: x.quantidade, tabela_id: x.tabelaId || null })),
+      p_forma: forma,
+      p_recebido: forma === 'dinheiro' ? valorRecebido : null,
+      p_desconto: valorDesconto,
+      p_tabela: tabelaId || null,
+      p_cliente: null,
+      p_operador: operador,
+    });
+    setSalvando(false);
+    if (error) {
+      setAviso('Venda NÃO registrada: ' + error.message);
+      return;
+    }
+    const r: any = data;
+    setVendaFeita({
+      numero: Number(r.numero),
+      total: Number(r.total),
+      troco: Number(r.troco),
+      forma,
+      recebido: forma === 'dinheiro' ? valorRecebido : null,
+      desconto: valorDesconto,
+      itens: carrinho.map((x) => ({
+        nome: x.produto.nome,
+        quantidade: x.quantidade,
+        preco: precoTab(x.produto, x.tabelaId),
+        subtotal: Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100,
       })),
+      data: new Date().toLocaleString('pt-BR'),
+    });
+    // baixa o saldo na tela (o banco já baixou de verdade)
+    setSaldos((prev) => {
+      const novo = { ...prev };
+      carrinho.forEach((x) => (novo[x.produto.id] = (novo[x.produto.id] || 0) - x.quantidade));
+      return novo;
+    });
+    setCarrinho([]);
+    setRecebido('');
+    setDesconto('');
+    setCarrinhoAberto(false);
+  }, [salvando, carrinho, forma, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
+
+  // atalho F10
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'F10') {
+        e.preventDefault();
+        finalizar();
+      }
     };
-    const { data, error } = await supabase.rpc('confirmar_nota_entrada', { p_nota: payload });
-    setConfirmando(false);
-    if (error) return setErro('Não foi possível confirmar: ' + error.message);
-    setResultado(data);
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [finalizar]);
+
+  const novaVenda = () => {
+    setVendaFeita(null);
+    setTimeout(() => buscaRef.current?.focus(), 50);
   };
-
-  // ---------- resultado ----------
-  if (resultado) {
-    return (
-      <div className="rounded-xl bg-white p-6 text-center shadow-sm">
-        <div className="text-4xl">✅</div>
-        <h3 className="mt-2 text-lg font-bold text-gray-800">Nota {nfe?.numero} lançada!</h3>
-        <ul className="mt-3 space-y-1 text-sm text-gray-600">
-          {resultado.fornecedor_criado && <li>Fornecedor cadastrado automaticamente.</li>}
-          <li>{resultado.itens} item(ns) lançado(s) no estoque.</li>
-          {resultado.produtos_criados > 0 && <li>{resultado.produtos_criados} produto(s) novo(s) cadastrado(s).</li>}
-          {resultado.contas_criadas > 0 && <li>{resultado.contas_criadas} conta(s) a pagar gerada(s).</li>}
-        </ul>
-        <button onClick={aoTerminar} className="mt-5 rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700">
-          Ver notas lançadas
-        </button>
-      </div>
-    );
-  }
-
-  // ---------- escolher arquivo ----------
-  if (!nfe || !prep) {
-    return (
-      <div className="rounded-xl bg-white p-6 shadow-sm">
-        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-300 p-10 text-center hover:border-blue-400 hover:bg-blue-50">
-          <span className="text-4xl">📄</span>
-          <span className="font-semibold text-gray-700">{lendo ? 'Lendo a nota...' : 'Escolha o arquivo XML da NF-e'}</span>
-          <span className="text-xs text-gray-500">O XML que o fornecedor envia por e-mail (termina em .xml)</span>
-          <input ref={inputRef} type="file" accept=".xml,text/xml,application/xml" className="hidden" onChange={(e) => escolherArquivo(e.target.files?.[0])} />
-        </label>
-        {erro && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
-      </div>
-    );
-  }
-
-  // ---------- conferência ----------
-  const lojaDiferente = prep.loja_cnpj && nfe.destinatario_cnpj && prep.loja_cnpj.replace(/\D/g, '') !== nfe.destinatario_cnpj;
 
   return (
-    <div className="space-y-3">
-      {prep.ja_importada && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          ⛔ Esta nota já foi lançada em {dataBR(prep.ja_importada.data_entrada)} (NF {prep.ja_importada.numero}). Não é possível lançar de novo.
-        </div>
-      )}
-      {lojaDiferente && (
-        <div className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
-          ⚠️ O destinatário desta nota ({formatarDoc(nfe.destinatario_cnpj)}) não é o CNPJ da sua loja. Confira se o XML é o certo.
-        </div>
-      )}
-
-      {/* cabeçalho */}
-      <div className="grid gap-3 rounded-xl bg-white p-4 shadow-sm sm:grid-cols-3">
-        <div>
-          <div className="text-xs uppercase text-gray-500">Nota</div>
-          <div className="font-semibold">
-            NF {nfe.numero} série {nfe.serie}
-          </div>
-          <div className="text-xs text-gray-500">Emissão {dataBR(nfe.data_emissao)}</div>
-          <div className="break-all font-mono text-[10px] text-gray-400">{nfe.chave}</div>
-        </div>
-        <div>
-          <div className="text-xs uppercase text-gray-500">Fornecedor</div>
-          <div className="font-semibold">{nfe.emitente.nome_fantasia || nfe.emitente.razao_social}</div>
-          <div className="text-xs text-gray-500">
-            {formatarDoc(nfe.emitente.cnpj_cpf)} · {nfe.emitente.endereco.cidade}/{nfe.emitente.endereco.uf}
-          </div>
-          {prep.fornecedor ? (
-            <span className="mt-1 inline-block rounded bg-green-50 px-2 py-0.5 text-xs text-green-700">✓ já cadastrado</span>
-          ) : (
-            <span className="mt-1 inline-block rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">+ será cadastrado automaticamente</span>
+    <div className="flex flex-col lg:flex-row gap-3 lg:h-[calc(100dvh-1.5rem)] pb-20 lg:pb-0">
+      {/* ===== Produtos ===== */}
+      <section className="flex-1 min-w-0 bg-white rounded-2xl shadow-sm border border-slate-200 p-3 sm:p-4 flex flex-col gap-3 lg:min-h-0">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base sm:text-lg font-black text-slate-800">🛒 Frente de Caixa</h2>
+          {tabelas.length > 0 && (
+            <select
+              value={tabelaId}
+              onChange={(e) => trocarTabelaGeral(e.target.value)}
+              title="Tabela de preço da venda (muda todos os itens; cada item pode ser trocado no carrinho)"
+              className="text-xs font-bold border border-slate-300 rounded-lg px-2 py-1.5 bg-white max-w-[45%]"
+              aria-label="Tabela de preço"
+            >
+              <option value="">Preço padrão</option>
+              {tabelas.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.nome}
+                </option>
+              ))}
+            </select>
           )}
         </div>
-        <div>
-          <label className="block">
-            <span className="text-xs uppercase text-gray-500">Data de entrada</span>
+
+        <div className="flex gap-2">
+          <div className="relative flex-1 min-w-0">
             <input
-              type="date"
-              className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1 text-sm"
-              value={dataEntrada}
-              onChange={(e) => setDataEntrada(e.target.value)}
+              ref={buscaRef}
+              type="text"
+              inputMode="search"
+              autoFocus
+              autoComplete="off"
+              value={busca}
+              onChange={(e) => setBusca(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' && sugestoes.length) {
+                  e.preventDefault();
+                  setIdxSel((i) => Math.min(i + 1, sugestoes.length - 1));
+                } else if (e.key === 'ArrowUp' && sugestoes.length) {
+                  e.preventDefault();
+                  setIdxSel((i) => Math.max(i - 1, 0));
+                } else if (e.key === 'Escape') {
+                  setBusca('');
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  aoEnterBusca();
+                }
+              }}
+              placeholder="Nome, código ou código de barras  (ex.: 3*arroz)"
+              className="w-full px-3 py-3 rounded-xl border border-slate-300 text-sm outline-none focus:border-blue-700"
             />
-          </label>
-        </div>
-      </div>
-
-      {/* totais */}
-      <div className="grid grid-cols-2 gap-2 rounded-xl bg-white p-4 text-sm shadow-sm sm:grid-cols-4 lg:grid-cols-8">
-        {[
-          ['Produtos', nfe.totais.produtos],
-          ['Frete', nfe.totais.frete],
-          ['Seguro', nfe.totais.seguro],
-          ['Outras desp.', nfe.totais.outras],
-          ['IPI', nfe.totais.ipi],
-          ['ICMS ST', nfe.totais.st],
-          ['Desconto', -nfe.totais.desconto],
-          ['Total da nota', nfe.totais.nota],
-        ].map(([r, v]) => (
-          <div key={r as string} className={r === 'Total da nota' ? 'font-bold' : ''}>
-            <div className="text-xs text-gray-500">{r}</div>
-            <div>{brl(v as number)}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* itens */}
-      <div className="space-y-2">
-        {itens.map((it, idx) => {
-          const custo = custoVenda(it);
-          return (
-            <div key={idx} className={`rounded-xl bg-white p-3 shadow-sm ${!it.novo && !it.produto ? 'ring-2 ring-red-300' : ''}`}>
-              <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs text-gray-400">
-                    Item {it.nfe.item} · cód. fornecedor {it.nfe.codigo_fornecedor}
-                    {it.nfe.ean && ` · EAN ${it.nfe.ean}`} · NCM {it.nfe.ncm} · CFOP {it.nfe.cfop}
-                  </div>
-                  <div className="font-medium text-gray-800">{it.nfe.descricao}</div>
-                  <div className="text-xs text-gray-600">
-                    {n4(it.nfe.quantidade)} {it.nfe.unidade} × {brl(it.nfe.valor_unitario)} = {brl(it.nfe.valor_produtos)}
-                    {(it.nfe.frete || it.nfe.seguro || it.nfe.outras || it.nfe.ipi || it.nfe.st || it.nfe.desconto) > 0 && (
-                      <span className="text-gray-400">
-                        {' '}
-                        {it.nfe.frete > 0 && `+ frete ${brl(it.nfe.frete)} `}
-                        {it.nfe.seguro > 0 && `+ seguro ${brl(it.nfe.seguro)} `}
-                        {it.nfe.outras > 0 && `+ outras ${brl(it.nfe.outras)} `}
-                        {it.nfe.ipi > 0 && `+ IPI ${brl(it.nfe.ipi)} `}
-                        {it.nfe.st > 0 && `+ ST ${brl(it.nfe.st)} `}
-                        {it.nfe.desconto > 0 && `− desc. ${brl(it.nfe.desconto)}`}
-                      </span>
-                    )}{' '}
-                    = <b>{brl(it.nfe.custo_total)}</b>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="text-xs text-gray-500">Custo final por unidade</div>
-                  <div className="text-lg font-bold text-gray-800">{brl(custo)}</div>
-                  {it.produto?.custo != null && Number(it.produto.custo) > 0 && (
-                    <div className={`text-xs ${custo > Number(it.produto.custo) ? 'text-red-600' : 'text-green-600'}`}>
-                      antes {brl(Number(it.produto.custo))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* vínculo com produto */}
-              <div className="mt-2 grid gap-2 rounded-lg bg-gray-50 p-2 sm:grid-cols-12">
-                <div className="sm:col-span-6">
-                  {it.novo ? (
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">PRODUTO NOVO</span>
-                        <button className="text-xs text-blue-600 underline" onClick={() => setBuscaIdx(idx)}>
-                          vincular a um produto existente
-                        </button>
-                      </div>
-                      <input
-                        className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                        value={it.nome_novo}
-                        onChange={(e) => alterar(idx, { nome_novo: e.target.value }, 'nao')}
-                        placeholder="Nome do produto"
-                      />
-                      <input
-                        className="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"
-                        value={it.codigo_barras_novo}
-                        onChange={(e) => alterar(idx, { codigo_barras_novo: e.target.value.replace(/\D/g, '') }, 'nao')}
-                        placeholder="Código de barras (opcional)"
-                        inputMode="numeric"
-                      />
-                    </div>
-                  ) : it.produto ? (
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
-                          {it.vinculo === 'fornecedor' ? 'VINCULADO' : it.vinculo === 'ean' ? 'ACHADO PELO CÓD. BARRAS' : 'ESCOLHIDO'}
-                        </span>
-                        <button className="text-xs text-blue-600 underline" onClick={() => setBuscaIdx(idx)}>
-                          trocar
-                        </button>
-                        <button className="text-xs text-blue-600 underline" onClick={() => alterar(idx, { produto: null, vinculo: null, novo: true }, 'forcar')}>
-                          cadastrar como novo
-                        </button>
-                      </div>
-                      <div className="text-sm font-medium">{it.produto.nome}</div>
-                      <div className="text-xs text-gray-500">
-                        {it.produto.codigo_barras || 'sem cód. barras'} · estoque atual {n4(Number(it.produto.estoque || 0))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm text-red-600">Escolha o produto:</span>
-                      <button className="rounded bg-white px-2 py-1 text-xs shadow-sm" onClick={() => setBuscaIdx(idx)}>
-                        buscar existente
-                      </button>
-                      <button className="rounded bg-white px-2 py-1 text-xs shadow-sm" onClick={() => alterar(idx, { novo: true }, 'forcar')}>
-                        cadastrar novo
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <label className="block sm:col-span-3">
-                  <span className="text-xs text-gray-500">Grupo (margem)</span>
-                  <input
-                    list="grupos-margem"
-                    className="w-full rounded border border-gray-300 px-2 py-1 text-sm uppercase"
-                    value={it.grupo}
-                    onChange={(e) => alterar(idx, { grupo: e.target.value.toUpperCase() }, 'forcar')}
-                    disabled={!it.novo && !!it.produto?.grupo}
-                    title={!it.novo && it.produto?.grupo ? 'O grupo vem do cadastro do produto' : ''}
-                  />
-                </label>
-                <label className="block sm:col-span-3">
-                  <span className="text-xs text-gray-500">
-                    Cada {it.nfe.unidade} tem quantas unidades?
-                  </span>
-                  <input
-                    className="w-full rounded border border-gray-300 px-2 py-1 text-right text-sm"
-                    inputMode="decimal"
-                    value={String(it.fator).replace('.', ',')}
-                    onChange={(e) => alterar(idx, { fator: numInput(e.target.value) || 1 }, 'manter')}
-                  />
-                  <span className="text-[11px] text-gray-500">
-                    entra {n4(it.nfe.quantidade * (it.fator || 1))} no estoque
-                  </span>
-                </label>
-              </div>
-
-              {/* preços */}
-              <div className="mt-2 flex flex-wrap items-end gap-3">
-                {it.precos.map((p) => {
-                  const t = prep.tabelas.find((x) => x.id === p.tabela_id);
-                  const atual = it.produto?.precos?.[p.tabela_id];
+            {sugestoes.length > 0 && (
+              <ul className="absolute left-0 right-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-xl max-h-72 overflow-y-auto divide-y">
+                {sugestoes.map((p, i) => {
+                  const saldo = saldos[p.id] || 0;
                   return (
-                    <div key={p.tabela_id} className="rounded-lg border border-gray-200 p-2">
-                      <div className="text-xs font-semibold text-gray-600">{t?.nome}</div>
-                      <div className="mt-1 flex items-center gap-1">
-                        <input
-                          className="w-16 rounded border border-gray-300 px-1 py-1 text-right text-sm"
-                          inputMode="decimal"
-                          value={String(p.margem).replace('.', ',')}
-                          onChange={(e) => alterarPreco(idx, p.tabela_id, 'margem', numInput(e.target.value))}
-                          disabled={!it.novo && !it.atualizar_precos}
-                        />
-                        <span className="text-xs text-gray-400">%</span>
-                        <span className="text-xs text-gray-400">→ R$</span>
-                        <input
-                          className="w-24 rounded border border-gray-300 px-1 py-1 text-right text-sm font-semibold"
-                          inputMode="decimal"
-                          value={p.preco.toFixed(2).replace('.', ',')}
-                          onChange={(e) => alterarPreco(idx, p.tabela_id, 'preco', numInput(e.target.value))}
-                          disabled={!it.novo && !it.atualizar_precos}
-                        />
-                      </div>
-                      {atual != null && <div className="mt-1 text-[11px] text-gray-500">preço atual {brl(Number(atual))}</div>}
-                    </div>
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => escolher(p)}
+                        onMouseEnter={() => setIdxSel(i)}
+                        className={`w-full text-left px-3 py-2.5 flex items-center justify-between gap-3 cursor-pointer ${i === idxSel ? 'bg-blue-50' : 'bg-white'}`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[13px] font-bold text-slate-800 truncate">{p.nome}</span>
+                          <span className="block text-[11px] text-slate-500 truncate">
+                            {p.sku}
+                            {p.codigo_barras ? ` · ${p.codigo_barras}` : ''} ·{' '}
+                            <span className={saldo <= 0 ? 'text-rose-600 font-bold' : ''}>{saldo <= 0 ? 'sem estoque' : `estoque ${saldo} ${p.unidade}`}</span>
+                          </span>
+                          {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} aoEscolher={(tab) => escolher(p, tab)} />}
+                        </span>
+                        <span className="font-black text-[13px] text-amber-600 whitespace-nowrap">{moeda(precoDe(p))}</span>
+                      </button>
+                    </li>
                   );
                 })}
-                {!it.novo && it.produto && (
-                  <label className="flex items-center gap-1 text-xs text-gray-600">
-                    <input type="checkbox" checked={it.atualizar_precos} onChange={(e) => alterar(idx, { atualizar_precos: e.target.checked }, 'nao')} />
-                    atualizar preços de venda
-                  </label>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <datalist id="grupos-margem">
-        {Array.from(new Set([...(prep.grupos || []), ...prep.margens.map((m) => m.grupo).filter(Boolean)])).map((g) => (
-          <option key={g} value={g} />
-        ))}
-      </datalist>
-
-      {/* duplicatas */}
-      <div className="rounded-xl bg-white p-4 shadow-sm">
-        <div className="mb-2 flex flex-wrap items-center gap-3">
-          <h3 className="font-semibold text-gray-800">Pagamento ao fornecedor</h3>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={gerarContas} onChange={(e) => setGerarContas(e.target.checked)} />
-            gerar contas a pagar
-          </label>
-        </div>
-        {nfe.duplicatas.length ? (
-          <table className="text-sm">
-            <tbody>
-              {nfe.duplicatas.map((d, i) => (
-                <tr key={i}>
-                  <td className="pr-4">Parcela {d.numero || i + 1}</td>
-                  <td className="pr-4">vence {dataBR(d.vencimento)}</td>
-                  <td className="text-right font-medium">{brl(d.valor)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="text-sm text-gray-500">
-            A nota não traz duplicatas. {gerarContas && 'Será gerada uma conta a pagar com o valor total, vencendo no prazo padrão do fornecedor (ou em 30 dias).'}
-          </p>
-        )}
-      </div>
-
-      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
-
-      <div className="sticky bottom-0 flex flex-wrap items-center gap-3 rounded-xl bg-white p-3 shadow-lg">
-        <span className="text-sm text-gray-600">
-          {itens.length} itens · {resumo.novos} novo(s)
-          {resumo.semVinculo > 0 && <span className="text-red-600"> · {resumo.semVinculo} sem produto</span>}
-        </span>
-        <div className="flex-1" />
-        <button
-          onClick={() => {
-            setNfe(null);
-            setPrep(null);
-            setErro('');
-          }}
-          className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
-        >
-          Cancelar
-        </button>
-        <button
-          onClick={confirmar}
-          disabled={confirmando || !!prep.ja_importada}
-          className="rounded-lg bg-green-600 px-6 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
-        >
-          {confirmando ? 'Lançando...' : '✓ Confirmar entrada'}
-        </button>
-      </div>
-
-      {buscaIdx !== null && (
-        <BuscaProduto
-          usuario={usuario}
-          sugestao={itens[buscaIdx]?.nfe.descricao || ''}
-          aoFechar={() => setBuscaIdx(null)}
-          aoEscolher={(p) => {
-            alterar(buscaIdx, { produto: p, vinculo: 'manual', novo: false, grupo: p.grupo || itens[buscaIdx].grupo }, 'forcar');
-            setBuscaIdx(null);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-// janela para buscar um produto já cadastrado
-function BuscaProduto({
-  usuario,
-  sugestao,
-  aoFechar,
-  aoEscolher,
-}: {
-  usuario: Usuario;
-  sugestao: string;
-  aoFechar: () => void;
-  aoEscolher: (p: ProdutoRes) => void;
-}) {
-  const [texto, setTexto] = useState(sugestao.split(' ').slice(0, 2).join(' '));
-  const [res, setRes] = useState<ProdutoRes[]>([]);
-  const [buscando, setBuscando] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      if (texto.trim().length < 2) return setRes([]);
-      setBuscando(true);
-      const { data } = await supabase.rpc('buscar_produtos_entrada', { p_codigo_loja: usuario.codigo_loja, p_texto: texto.trim() });
-      setRes((data as ProdutoRes[]) || []);
-      setBuscando(false);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [texto, usuario.codigo_loja]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={aoFechar}>
-      <div className="max-h-[80vh] w-full max-w-lg overflow-hidden rounded-t-2xl bg-white sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="border-b p-3">
-          <div className="mb-1 text-xs text-gray-500">Item da nota: {sugestao}</div>
-          <input
-            autoFocus
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-            placeholder="Nome ou código de barras do produto"
-            value={texto}
-            onChange={(e) => setTexto(e.target.value)}
-          />
-        </div>
-        <ul className="max-h-[55vh] divide-y overflow-y-auto">
-          {buscando && <li className="p-3 text-sm text-gray-500">Buscando...</li>}
-          {!buscando && res.length === 0 && texto.length >= 2 && <li className="p-3 text-sm text-gray-500">Nenhum produto encontrado.</li>}
-          {res.map((p) => (
-            <li key={p.id}>
-              <button onClick={() => aoEscolher(p)} className="w-full p-3 text-left hover:bg-blue-50">
-                <div className="text-sm font-medium">{p.nome}</div>
-                <div className="text-xs text-gray-500">
-                  {p.codigo_barras || 'sem cód. barras'} {p.grupo && `· ${p.grupo}`} · estoque {n4(Number(p.estoque || 0))}
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
-        <div className="border-t p-2 text-right">
-          <button onClick={aoFechar} className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100">
-            Fechar
+              </ul>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setCamera(true)}
+            className="px-4 rounded-xl bg-blue-900 text-white font-black text-lg cursor-pointer active:scale-95"
+            aria-label="Ler com a câmera"
+            title="Ler com a câmera"
+          >
+            📷
           </button>
         </div>
-      </div>
+
+        {aviso && <div className="text-xs font-semibold bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">{aviso}</div>}
+        {erro && <div className="text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800 rounded-lg px-3 py-2">{erro}</div>}
+
+        <div className="flex-1 lg:overflow-y-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 gap-2 content-start">
+          {carregando && <p className="col-span-full text-center text-sm text-slate-500 py-8">Carregando produtos...</p>}
+          {!carregando && filtrados.length === 0 && (
+            <p className="col-span-full text-center text-sm text-slate-500 py-8">
+              {produtos.length === 0 ? 'Nenhum produto cadastrado ainda. Cadastre em Produtos & Estoque.' : 'Nada encontrado.'}
+            </p>
+          )}
+          {filtrados.map((p) => {
+            const saldo = saldos[p.id] || 0;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => {
+                  adicionar(p);
+                  setBusca('');
+                }}
+                className="text-left bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl p-3 flex flex-col justify-between min-h-[92px] cursor-pointer active:scale-[0.97] transition"
+              >
+                <div>
+                  <p className="font-bold text-[13px] leading-tight text-slate-800 line-clamp-2">{p.nome}</p>
+                  <p className={`text-[11px] mt-1 ${saldo <= 0 ? 'text-rose-600 font-bold' : 'text-slate-500'}`}>
+                    {saldo <= 0 ? 'Sem estoque' : `Estoque: ${saldo} ${p.unidade}`}
+                  </p>
+                </div>
+                <div className="mt-2">
+                  <p className="font-black text-[15px] text-amber-600">{moeda(precoDe(p))}</p>
+                  {tabelas.length > 0 && (
+                    <PrecosTabelas
+                      lista={precosDe(p)}
+                      selecionada={tabelaId}
+                      aoEscolher={(tab) => {
+                        adicionar(p, 1, tab);
+                        setBusca('');
+                      }}
+                    />
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ===== Carrinho ===== */}
+      <section
+        className={`${carrinhoAberto ? 'flex' : 'hidden'} lg:flex fixed lg:static inset-x-0 bottom-0 top-12 lg:top-auto z-30 lg:z-auto lg:w-[380px] xl:w-[420px] shrink-0 bg-white lg:rounded-2xl rounded-t-2xl shadow-2xl lg:shadow-sm border border-slate-200 flex-col p-3 sm:p-4 gap-3 lg:min-h-0`}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="font-black text-sm text-slate-800">Venda atual</h3>
+          <button type="button" onClick={() => setCarrinhoAberto(false)} className="lg:hidden text-slate-500 font-bold text-xl px-2 cursor-pointer" aria-label="Fechar carrinho">
+            ✕
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto flex flex-col gap-2 min-h-[120px]">
+          {carrinho.length === 0 && <p className="text-center text-xs text-slate-400 py-10">Nenhum item. Leia um código ou toque num produto.</p>}
+          {carrinho.map((x) => {
+            const preco = precoTab(x.produto, x.tabelaId);
+            const opcoes = precosDe(x.produto);
+            return (
+              <div key={x.produto.id} className="bg-slate-50 rounded-xl p-2.5 text-xs">
+                <div className="flex justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-bold text-slate-800 leading-tight">{x.produto.nome}</p>
+                    {opcoes.length > 1 && (
+                      <select
+                        value={x.tabelaId}
+                        onChange={(e) => trocarTabelaItem(x.produto.id, e.target.value)}
+                        className="mt-1 rounded border border-amber-300 bg-amber-50 px-1 py-0.5 text-[11px] font-bold text-amber-900"
+                        aria-label="Tabela de preço do item"
+                      >
+                        {opcoes.map((o) => (
+                          <option key={o.id || 'padrao'} value={o.id}>
+                            {o.nome} · {moeda(o.preco)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <button type="button" onClick={() => remover(x.produto.id)} className="text-rose-600 font-black cursor-pointer" aria-label="Remover item">
+                    ✕
+                  </button>
+                </div>
+                <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => ajustarQtd(x.produto.id, -1)} className="w-8 h-8 rounded-lg bg-white border border-slate-300 font-black cursor-pointer active:scale-95">
+                      −
+                    </button>
+                    <input
+                      key={x.quantidade}
+                      defaultValue={x.quantidade}
+                      inputMode="decimal"
+                      onBlur={(e) => definirQtd(x.produto.id, e.target.value)}
+                      className="w-12 h-8 text-center rounded-lg border border-slate-300 font-bold"
+                    />
+                    <button type="button" onClick={() => ajustarQtd(x.produto.id, 1)} className="w-8 h-8 rounded-lg bg-white border border-slate-300 font-black cursor-pointer active:scale-95">
+                      +
+                    </button>
+                    <span className="text-slate-500 ml-1">× {moeda(preco)}</span>
+                  </div>
+                  <span className="font-black text-slate-900">{moeda(Math.round(preco * x.quantidade * 100) / 100)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="border-t pt-3 flex flex-col gap-2.5">
+          <div className="grid grid-cols-4 gap-1.5">
+            {FORMAS.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => setForma(f.id)}
+                className={`py-2 rounded-lg text-[11px] font-bold border cursor-pointer leading-tight ${
+                  forma === f.id ? 'bg-blue-900 text-white border-blue-900' : 'bg-white text-slate-700 border-slate-300'
+                }`}
+              >
+                <span className="block text-base">{f.icone}</span>
+                {f.rotulo}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-[11px] font-bold text-slate-500">
+              DESCONTO (R$)
+              <input
+                value={desconto}
+                onChange={(e) => setDesconto(e.target.value)}
+                inputMode="decimal"
+                placeholder="0,00"
+                className="mt-1 w-full border border-slate-300 rounded-lg px-2 py-2 text-sm font-semibold text-slate-800"
+              />
+            </label>
+            {forma === 'dinheiro' && (
+              <label className="text-[11px] font-bold text-slate-500">
+                RECEBIDO (R$)
+                <input
+                  value={recebido}
+                  onChange={(e) => setRecebido(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="0,00"
+                  className="mt-1 w-full border border-slate-300 rounded-lg px-2 py-2 text-sm font-semibold text-slate-800"
+                />
+              </label>
+            )}
+          </div>
+          {forma === 'dinheiro' && troco > 0 && <p className="text-sm font-black text-emerald-700">Troco: {moeda(troco)}</p>}
+
+          <div className="bg-slate-900 text-white rounded-xl px-4 py-3 flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-400">TOTAL{valorDesconto > 0 ? ` (desc. ${moeda(valorDesconto)})` : ''}</span>
+            <span className="text-2xl font-black text-amber-300">{moeda(total)}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={finalizar}
+            disabled={salvando || carrinho.length === 0}
+            className="w-full py-4 rounded-xl bg-amber-400 text-slate-900 font-black text-base shadow cursor-pointer disabled:opacity-50 active:scale-[0.98]"
+          >
+            {salvando ? 'Registrando...' : '⚡ FINALIZAR VENDA  [F10]'}
+          </button>
+        </div>
+      </section>
+
+      {/* Barra fixa no celular */}
+      {!carrinhoAberto && (
+        <button
+          type="button"
+          onClick={() => setCarrinhoAberto(true)}
+          className="lg:hidden fixed left-3 right-3 bottom-3 z-20 bg-slate-900 text-white rounded-2xl px-4 py-3.5 flex items-center justify-between shadow-2xl cursor-pointer active:scale-[0.99]"
+        >
+          <span className="text-sm font-bold">
+            🛒 {qtdItens} {qtdItens === 1 ? 'item' : 'itens'}
+          </span>
+          <span className="text-lg font-black text-amber-300">{moeda(total)} ›</span>
+        </button>
+      )}
+
+      {camera && <LeitorCamera aoLer={aoLerCamera} aoFechar={() => setCamera(false)} />}
+
+      {/* Venda concluída */}
+      {vendaFeita && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-5 text-center">
+            <p className="text-4xl">✅</p>
+            <h3 className="font-black text-lg text-slate-800 mt-1">Venda nº {vendaFeita.numero} registrada</h3>
+            <p className="text-2xl font-black text-emerald-700 mt-2">{moeda(vendaFeita.total)}</p>
+            {vendaFeita.troco > 0 && <p className="text-sm font-bold text-slate-700 mt-1">Troco: {moeda(vendaFeita.troco)}</p>}
+            <div className="grid grid-cols-2 gap-2 mt-5">
+              <button type="button" onClick={() => imprimirRecibo(vendaFeita, nomeLoja)} className="py-3 rounded-xl bg-blue-900 text-white font-black cursor-pointer">
+                🖨️ Imprimir
+              </button>
+              <button type="button" onClick={novaVenda} className="py-3 rounded-xl bg-amber-400 text-slate-900 font-black cursor-pointer">
+                Nova venda
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

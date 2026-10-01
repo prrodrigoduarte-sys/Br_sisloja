@@ -65,6 +65,8 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [saldos, setSaldos] = useState<Record<string, Record<string, number>>>({});
   const [tabelas, setTabelas] = useState<TabelaPreco[]>([]);
   const [precosLista, setPrecosLista] = useState<Record<string, number>>({}); // `${tabela}|${produto}` -> preço
+  const [viaNF, setViaNF] = useState<Set<string>>(new Set()); // produtos que entraram por nota fiscal (XML)
+  const [soViaNF, setSoViaNF] = useState(false);
   const [busca, setBusca] = useState('');
   const [soBaixo, setSoBaixo] = useState(false);
   const [verNaoCirculantes, setVerNaoCirculantes] = useState(false);
@@ -87,12 +89,14 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
 
   const carregar = useCallback(async () => {
     setCarregando(true);
-    const [p, s, t, pp] = await Promise.all([
-      supabase.from('produtos').select('*').order('nome').limit(5000),
-      supabase.from('estoque_saldos').select('produto_id, tipo, saldo').limit(20000),
+    const [p, s, t, pp, nf] = await Promise.all([
+      supabase.from('produtos').select('*').order('nome').limit(10000),
+      supabase.from('estoque_saldos').select('produto_id, tipo, saldo').limit(50000),
       supabase.from('tabelas_preco').select('id, nome').order('nome'),
       supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
+      supabase.from('notas_entrada_itens').select('produto_id').limit(50000),
     ]);
+    setViaNF(new Set(((nf.data as any[]) || []).map((x) => x.produto_id).filter(Boolean)));
     const mapaPrecos: Record<string, number> = {};
     (pp.data || []).forEach((x: any) => (mapaPrecos[`${x.tabela_id}|${x.produto_id}`] = Number(x.preco)));
     setPrecosLista(mapaPrecos);
@@ -122,11 +126,12 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
     const q = busca.trim().toLowerCase();
     return produtos.filter((p) => {
       if (!!p.nao_listar_estoque !== verNaoCirculantes) return false;
+      if (soViaNF && !viaNF.has(p.id)) return false;
       if (soBaixo && !((saldos[p.id]?.fisico || 0) <= p.estoque_minimo)) return false;
       if (!q) return true;
       return p.nome.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.codigo_barras || '').includes(q);
     });
-  }, [produtos, busca, soBaixo, saldos, verNaoCirculantes]);
+  }, [produtos, busca, soBaixo, saldos, verNaoCirculantes, soViaNF, viaNF]);
 
   // item não circulante não entra no valor do estoque
   const valorEstoque = useMemo(
@@ -355,6 +360,12 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <input type="checkbox" checked={verNaoCirculantes} onChange={(e) => setVerNaoCirculantes(e.target.checked)} className="w-4 h-4" />
           Ver só os não circulantes
         </label>
+        {viaNF.size > 0 && (
+          <label className="flex items-center gap-2 text-xs font-bold text-violet-800 cursor-pointer">
+            <input type="checkbox" checked={soViaNF} onChange={(e) => setSoViaNF(e.target.checked)} className="w-4 h-4" />
+            <span className="rounded bg-violet-100 px-1.5 py-0.5">📄 Só os que vieram por nota fiscal ({viaNF.size})</span>
+          </label>
+        )}
       </div>
 
       {msg && <div className="text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">{msg}</div>}
@@ -384,9 +395,17 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               const s = saldos[p.id] || {};
               const baixo = (s.fisico || 0) <= p.estoque_minimo;
               return (
-                <tr key={p.id} className={p.ativo ? '' : 'opacity-50'}>
+                <tr
+                  key={p.id}
+                  className={`${p.ativo ? '' : 'opacity-50'} ${viaNF.has(p.id) ? 'bg-violet-50 border-l-4 border-l-violet-500' : ''}`}
+                >
                   <td className="p-2">
-                    <p className="font-bold text-slate-800 leading-tight">{p.nome}</p>
+                    <p className="font-bold text-slate-800 leading-tight">
+                      {p.nome}
+                      {viaNF.has(p.id) && (
+                        <span className="ml-1.5 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">📄 via NF</span>
+                      )}
+                    </p>
                     <p className="text-[11px] text-slate-500">
                       {p.sku}
                       {p.codigo_barras ? ` · ${p.codigo_barras}` : ''}
