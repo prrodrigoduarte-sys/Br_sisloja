@@ -1,0 +1,220 @@
+// BR Sisloja - Fracionamento: descobre em que embalagem o item veio na NF-e
+// (caixa, pacote, fardo, dúzia, saco de 5 kg...) e quanto isso vale na unidade de venda.
+// Ex.: "DISCO CORTE 4.1/2 CX C/50" comprado em CX -> 1 CX = 50 UN.
+//      "ARROZ TIPO 1 FD 10X1KG" comprado em FD -> 1 FD = 10 UN, ou 10 KG, ou 10.000 G.
+
+export const UNIDADES_VENDA = ['UN', 'KG', 'G', 'L', 'ML', 'M', 'CM'] as const;
+
+export type Deteccao = {
+  embalagem: string; // sigla normalizada da unidade de compra (CX, PCT, FD, DZ, SC, KG, UN...)
+  nome: string; // "Caixa", "Pacote"...
+  eh_embalagem: boolean; // CX/PCT/FD/... (precisa de fator); UN/PC não
+  qtd_por_embalagem: number | null; // unidades dentro de cada embalagem (C/50, 12X1L, DZ...)
+  conteudo: { valor: number; unidade: 'KG' | 'G' | 'L' | 'ML' | 'M' } | null; // peso/volume de cada unidade (1KG, 500G, 2L)
+  origem: 'xml' | 'descricao' | 'unidade' | null; // de onde veio a quantidade
+  trecho: string; // pedaço da descrição que serviu de pista ("C/50")
+};
+
+type InfoEmb = { sigla: string; nome: string; embalagem: boolean; fixo?: number; medida?: 'KG' | 'G' | 'L' | 'ML' | 'M' | 'CM' };
+
+// sinônimos que aparecem no campo uCom das notas
+const UNIDADES: [RegExp, InfoEmb][] = [
+  [/^(CX|CXA|CAIXA|CAI|BOX)\d*$/, { sigla: 'CX', nome: 'Caixa', embalagem: true }],
+  [/^(PCT|PACOTE|PAC|PT|PK|PACK)\d*$/, { sigla: 'PCT', nome: 'Pacote', embalagem: true }],
+  [/^(FD|FARDO|FDO)\d*$/, { sigla: 'FD', nome: 'Fardo', embalagem: true }],
+  [/^(DZ|DUZIA|DUZ)$/, { sigla: 'DZ', nome: 'Dúzia', embalagem: true, fixo: 12 }],
+  [/^(CENTO|CT|CEN)$/, { sigla: 'CENTO', nome: 'Cento', embalagem: true, fixo: 100 }],
+  [/^(MIL|MILHEIRO|MI|ML?H)$/, { sigla: 'MIL', nome: 'Milheiro', embalagem: true, fixo: 1000 }],
+  [/^(PAR|PR|PARES)$/, { sigla: 'PAR', nome: 'Par', embalagem: true, fixo: 2 }],
+  [/^(SC|SACO|SACA|SCO)\d*$/, { sigla: 'SC', nome: 'Saco', embalagem: true }],
+  [/^(BD|BALDE)$/, { sigla: 'BD', nome: 'Balde', embalagem: true }],
+  [/^(GL|GALAO)$/, { sigla: 'GL', nome: 'Galão', embalagem: true }],
+  [/^(BB|BOMBONA)$/, { sigla: 'BB', nome: 'Bombona', embalagem: true }],
+  [/^(DP|DISPLAY|DISP|EXP|EXPOSITOR)$/, { sigla: 'DP', nome: 'Display', embalagem: true }],
+  [/^(KIT|KT)$/, { sigla: 'KIT', nome: 'Kit', embalagem: true }],
+  [/^(JG|JOGO)$/, { sigla: 'JG', nome: 'Jogo', embalagem: true }],
+  [/^(RL|ROLO|BOB|BOBINA)$/, { sigla: 'RL', nome: 'Rolo', embalagem: true }],
+  [/^(CJ|CONJ|CONJUNTO)$/, { sigla: 'CJ', nome: 'Conjunto', embalagem: true }],
+  [/^(BL|BLISTER|CART|CARTELA)$/, { sigla: 'BL', nome: 'Cartela', embalagem: true }],
+  [/^(TB|TUBO)$/, { sigla: 'TB', nome: 'Tubo', embalagem: true }],
+  [/^(LT|LATA)$/, { sigla: 'LT', nome: 'Lata', embalagem: false }],
+  [/^(KG|KGS|QUILO|KILO|K)$/, { sigla: 'KG', nome: 'Quilo', embalagem: false, medida: 'KG' }],
+  [/^(G|GR|GRS|GRAMA)$/, { sigla: 'G', nome: 'Grama', embalagem: false, medida: 'G' }],
+  [/^(TON|TONELADA|T)$/, { sigla: 'TON', nome: 'Tonelada', embalagem: true, fixo: 1000, medida: 'KG' }],
+  [/^(L|LITRO|LTS|LITROS)$/, { sigla: 'L', nome: 'Litro', embalagem: false, medida: 'L' }],
+  [/^(ML|MILILITRO)$/, { sigla: 'ML', nome: 'Mililitro', embalagem: false, medida: 'ML' }],
+  [/^(M|MT|MTS|METRO|MTR)$/, { sigla: 'M', nome: 'Metro', embalagem: false, medida: 'M' }],
+  [/^(CM)$/, { sigla: 'CM', nome: 'Centímetro', embalagem: false, medida: 'CM' }],
+  [/^(UN|UND|UNID|UNIDADE|U|PC|PCS|PECA|PCA|UNI)$/, { sigla: 'UN', nome: 'Unidade', embalagem: false }],
+];
+
+export function infoUnidade(u: string): InfoEmb {
+  const s = (u || 'UN')
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z0-9]/g, '');
+  for (const [re, info] of UNIDADES) if (re.test(s)) return info;
+  return { sigla: s || 'UN', nome: s || 'Unidade', embalagem: false };
+}
+
+// número da embalagem colado na sigla: "CX50", "FD12"
+function numeroNaSigla(u: string) {
+  const m = (u || '').toUpperCase().match(/^[A-Z]+(\d{1,4})$/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+const numero = (s: string) => parseFloat(s.replace(',', '.'));
+
+function medidaNormal(u: string): 'KG' | 'G' | 'L' | 'ML' | 'M' | null {
+  const s = u.toUpperCase();
+  if (s === 'KG' || s === 'KGS' || s === 'K') return 'KG';
+  if (s === 'G' || s === 'GR' || s === 'GRS') return 'G';
+  if (s === 'L' || s === 'LT' || s === 'LTS') return 'L';
+  if (s === 'ML') return 'ML';
+  if (s === 'M' || s === 'MT' || s === 'MTS') return 'M';
+  return null;
+}
+
+// procura na descrição: "C/50", "CX C/ 50 UN", "COM 12", "50UN", "12X1L", "CX50", "DZ"
+export function lerDescricao(desc: string) {
+  const d = ' ' + (desc || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') + ' ';
+  let qtd: number | null = null;
+  let trecho = '';
+  let conteudo: Deteccao['conteudo'] = null;
+
+  // 12X1L, 6 X 2 LT, 24X350ML, 10X1KG
+  let m = d.match(/\b(\d{1,4})\s*X\s*(\d+(?:[.,]\d+)?)\s*(KG|KGS|GR|GRS|G|ML|LTS|LT|L|MTS|MT|M)\b/);
+  if (m) {
+    qtd = parseInt(m[1], 10);
+    const med = medidaNormal(m[3]);
+    if (med) conteudo = { valor: numero(m[2]), unidade: med };
+    trecho = m[0].trim();
+  }
+  // C/50, C/ 50 UN, COM 12 UNID, CX C/50, CT C/100
+  if (!qtd) {
+    m = d.match(/(?:\bC\/|\bC\.\s|\bCOM\s|\bCONT(?:EM)?\.?\s?)\s*(\d{1,4})\s*(UNIDADES|UNID|UND|UN|U|PCS|PECAS|PC|ROLOS|FOLHAS|FLS)?\b/);
+    if (m) {
+      qtd = parseInt(m[1], 10);
+      trecho = m[0].trim();
+    }
+  }
+  // CX50, CX 50, CX-50, PCT 10, FD 12, DP 24
+  if (!qtd) {
+    m = d.match(/\b(CX|CXA|CAIXA|PCT|PACOTE|PC|FD|FARDO|DP|DISPLAY|EMB)\s*[-.:]?\s*(\d{1,4})\b(?!\s*(KG|G|GR|ML|L|LT|M|MM|CM|POL|"))/);
+    if (m) {
+      qtd = parseInt(m[2], 10);
+      trecho = m[0].trim();
+    }
+  }
+  // 50UN, 100 UNIDADES, 12PCS
+  if (!qtd) {
+    m = d.match(/\b(\d{1,4})\s*(UNIDADES|UNID|UND|UN|PCS|PECAS)\b/);
+    if (m) {
+      qtd = parseInt(m[1], 10);
+      trecho = m[0].trim();
+    }
+  }
+  // DUZIA / DZ na descrição
+  if (!qtd && /\b(DZ|DUZIA)\b/.test(d)) {
+    qtd = 12;
+    trecho = 'DZ';
+  }
+  // peso/volume solto: ARROZ 5KG, OLEO 900ML, CAFE 500G
+  if (!conteudo) {
+    const todos = Array.from(d.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(KG|KGS|GRS|GR|G|ML|LTS|LT|L)\b/g));
+    const ult = todos[todos.length - 1];
+    if (ult) {
+      const med = medidaNormal(ult[2]);
+      if (med) conteudo = { valor: numero(ult[1]), unidade: med };
+    }
+  }
+  if (qtd !== null && (qtd < 2 || qtd > 10000)) qtd = null;
+  return { qtd, trecho, conteudo };
+}
+
+export function detectarEmbalagem(unidadeNota: string, descricao: string, fatorXml: number): Deteccao {
+  const info = infoUnidade(unidadeNota);
+  const desc = lerDescricao(descricao);
+  let qtd: number | null = null;
+  let origem: Deteccao['origem'] = null;
+  let trecho = '';
+
+  if (fatorXml > 1) {
+    qtd = fatorXml;
+    origem = 'xml';
+  } else if (info.fixo) {
+    qtd = info.fixo;
+    origem = 'unidade';
+    trecho = info.sigla;
+  } else if (numeroNaSigla(unidadeNota)) {
+    qtd = numeroNaSigla(unidadeNota);
+    origem = 'unidade';
+    trecho = unidadeNota.toUpperCase();
+  } else if (info.embalagem && desc.qtd) {
+    qtd = desc.qtd;
+    origem = 'descricao';
+    trecho = desc.trecho;
+  }
+  return {
+    embalagem: info.sigla,
+    nome: info.nome,
+    eh_embalagem: info.embalagem || !!numeroNaSigla(unidadeNota),
+    qtd_por_embalagem: qtd,
+    conteudo: desc.conteudo,
+    origem,
+    trecho,
+  };
+}
+
+// para converter peso/volume: quanto vale 1 unidade de "de" em "para"
+const BASE: Record<string, { grupo: 'massa' | 'volume' | 'comprimento'; fator: number }> = {
+  KG: { grupo: 'massa', fator: 1000 },
+  G: { grupo: 'massa', fator: 1 },
+  L: { grupo: 'volume', fator: 1000 },
+  ML: { grupo: 'volume', fator: 1 },
+  M: { grupo: 'comprimento', fator: 100 },
+  CM: { grupo: 'comprimento', fator: 1 },
+};
+export function converter(valor: number, de: string, para: string): number | null {
+  const a = BASE[de];
+  const b = BASE[para];
+  if (!a || !b || a.grupo !== b.grupo) return null;
+  return (valor * a.fator) / b.fator;
+}
+
+// fator (quanto entra no estoque, na unidade de venda, para cada unidade da nota)
+export function fatorPara(det: Deteccao, unidadeVenda: string): number | null {
+  const uv = unidadeVenda.toUpperCase();
+  const qtd = det.qtd_por_embalagem || 1;
+  // comprado já em peso/volume (KG, L, M...): converte direto
+  const medidaCompra = infoUnidade(det.embalagem).medida;
+  if (medidaCompra) {
+    const c = converter(1, medidaCompra, uv);
+    if (c != null) return c * (infoUnidade(det.embalagem).fixo || 1);
+  }
+  if (uv === 'UN') return det.qtd_por_embalagem || 1;
+  // vender por peso/volume: qtd de unidades × conteúdo de cada uma
+  if (det.conteudo) {
+    const c = converter(det.conteudo.valor, det.conteudo.unidade, uv);
+    if (c != null) return qtd * c;
+  }
+  return null;
+}
+
+// unidade de venda sugerida para produto novo
+export function unidadeSugerida(det: Deteccao): string {
+  const med = infoUnidade(det.embalagem).medida;
+  if (med) return med;
+  return 'UN';
+}
+
+export const nomeUnidadeVenda: Record<string, string> = {
+  UN: 'unidade',
+  KG: 'quilo',
+  G: 'grama',
+  L: 'litro',
+  ML: 'mililitro',
+  M: 'metro',
+  CM: 'centímetro',
+};
