@@ -204,6 +204,25 @@ ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido</td><td style
 }
 
 // ---------- Tela do PDV ----------
+// preços de cada tabela (Padrão, Varejo, Atacado...) em miniatura; a tabela usada na venda fica destacada
+function PrecosTabelas({ lista, selecionada }: { lista: { id: string; nome: string; preco: number }[]; selecionada: string }) {
+  if (lista.length < 2) return null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1">
+      {lista.map((x) => (
+        <span
+          key={x.id || 'padrao'}
+          className={`rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap ${
+            x.id === selecionada ? 'bg-amber-500 text-white font-bold' : 'bg-slate-100 text-slate-600'
+          }`}
+        >
+          {x.nome} {moeda(x.preco)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [saldos, setSaldos] = useState<Record<string, number>>({});
@@ -266,6 +285,15 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   const precoDe = useCallback(
     (p: Produto) => (tabelaId && precos[tabelaId] && precos[tabelaId][p.id] != null ? precos[tabelaId][p.id] : p.preco_venda),
     [tabelaId, precos]
+  );
+
+  // todos os preços do produto (padrão + cada tabela), para mostrar como sugestão
+  const precosDe = useCallback(
+    (p: Produto) => [
+      { id: '', nome: 'Padrão', preco: p.preco_venda },
+      ...tabelas.filter((t) => precos[t.id]?.[p.id] != null).map((t) => ({ id: t.id, nome: t.nome, preco: precos[t.id][p.id] })),
+    ],
+    [tabelas, precos]
   );
 
   // ---- busca: nome, SKU ou código de barras (sem depender de acento, várias palavras) ----
@@ -508,6 +536,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
                             {p.codigo_barras ? ` · ${p.codigo_barras}` : ''} ·{' '}
                             <span className={saldo <= 0 ? 'text-rose-600 font-bold' : ''}>{saldo <= 0 ? 'sem estoque' : `estoque ${saldo} ${p.unidade}`}</span>
                           </span>
+                          {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} />}
                         </span>
                         <span className="font-black text-[13px] text-amber-600 whitespace-nowrap">{moeda(precoDe(p))}</span>
                       </button>
@@ -556,7 +585,10 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
                     {saldo <= 0 ? 'Sem estoque' : `Estoque: ${saldo} ${p.unidade}`}
                   </p>
                 </div>
-                <p className="font-black text-[15px] text-amber-600 mt-2">{moeda(precoDe(p))}</p>
+                <div className="mt-2">
+                  <p className="font-black text-[15px] text-amber-600">{moeda(precoDe(p))}</p>
+                  {tabelas.length > 0 && <PrecosTabelas lista={precosDe(p)} selecionada={tabelaId} />}
+                </div>
               </button>
             );
           })}
