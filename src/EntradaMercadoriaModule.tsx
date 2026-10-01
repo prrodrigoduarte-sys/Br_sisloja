@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
 import { lerNfe, type Nfe, type NfeItem, precoComMargem, margemDoPreco, arred2, arred4 } from './nfeXml';
 import { formatarDoc } from './FornecedoresModule';
+import { detectarEmbalagem, fatorPara, infoUnidade, UNIDADES_VENDA, type Deteccao } from './embalagem';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 
@@ -31,7 +32,10 @@ type ItemConf = {
   nome_novo: string;
   codigo_barras_novo: string;
   grupo: string;
-  fator: number; // unidades de venda por unidade da nota
+  fator: number; // unidades de venda por unidade da nota (1 = entra como veio na nota)
+  fracionado: boolean; // false = campo vazio, segue o padrão da nota
+  unidade_venda: string; // UN, KG, G, L, ML, M... (só vale quando fracionado)
+  det: Deteccao; // embalagem detectada (caixa, pacote, fardo, saco de 5 kg...)
   atualizar_precos: boolean;
   precos: PrecoLinha[];
 };
@@ -353,6 +357,153 @@ function Margens({ usuario }: { usuario: Usuario }) {
 }
 
 // =====================================================================
+// FRACIONAR (na frente de cada produto): 1 CX = 50 UN, 1 FD = 10 KG, 1 KG = 1000 G...
+// Campo vazio = entra como veio na nota. As sugestões só valem se você clicar nelas.
+// =====================================================================
+function Fracionar({ it, custo, aoMudar }: { it: ItemConf; custo: number; aoMudar: (m: Partial<ItemConf>) => void }) {
+  const det = it.det;
+  const uNota = it.nfe.unidade;
+  const [texto, setTexto] = useState(it.fracionado ? String(it.fator).replace('.', ',') : '');
+
+  const sugestoes = useMemo(() => {
+    const lista: { fator: number; unidade: string; motivo: string }[] = [];
+    const motivoQtd =
+      det.origem === 'xml'
+        ? 'o XML da nota informa a quantidade por embalagem'
+        : det.origem === 'descricao'
+        ? `achei "${det.trecho}" na descrição`
+        : det.origem === 'unidade'
+        ? `${det.nome} (${det.trecho})`
+        : '';
+    const motivoPeso = det.conteudo ? `cada um tem ${String(det.conteudo.valor).replace('.', ',')} ${det.conteudo.unidade}` : '';
+    const add = (u: string, motivo: string) => {
+      const f = fatorPara(det, u);
+      if (f && f > 0 && f !== 1 && !lista.some((s) => s.unidade === u)) lista.push({ fator: arred4(f), unidade: u, motivo });
+    };
+    if (det.qtd_por_embalagem) add('UN', motivoQtd);
+    const medidaCompra = infoUnidade(uNota).medida;
+    if (medidaCompra === 'KG') add('G', '1 KG = 1.000 G');
+    if (medidaCompra === 'L') add('ML', '1 L = 1.000 ML');
+    if (medidaCompra === 'M') add('CM', '1 M = 100 CM');
+    if (det.conteudo && !medidaCompra) {
+      const grupo = ['KG', 'G'].includes(det.conteudo.unidade) ? ['KG', 'G'] : ['L', 'ML'].includes(det.conteudo.unidade) ? ['L', 'ML'] : ['M'];
+      grupo.forEach((u) => add(u, [motivoQtd, motivoPeso].filter(Boolean).join(' · ')));
+    }
+    // a unidade do produto já cadastrado vem primeiro
+    const uProd = (it.produto?.unidade || '').toUpperCase();
+    return lista.sort((a, b) => (b.unidade === uProd ? 1 : 0) - (a.unidade === uProd ? 1 : 0));
+  }, [det, uNota, it.produto]);
+
+  const eanDaCaixa = it.novo && !!it.nfe.ean && it.codigo_barras_novo === it.nfe.ean;
+
+  const aplicar = (fator: number, unidade: string) => {
+    setTexto(String(fator).replace('.', ','));
+    aoMudar({
+      fracionado: true,
+      fator,
+      unidade_venda: unidade,
+      // o código de barras da caixa não serve para vender a unidade
+      ...(eanDaCaixa && fator > 1 ? { codigo_barras_novo: it.nfe.ean_trib && it.nfe.ean_trib !== it.nfe.ean ? it.nfe.ean_trib : '' } : {}),
+    });
+  };
+
+  const digitar = (t: string) => {
+    setTexto(t);
+    if (!t.trim()) return aoMudar({ fracionado: false, fator: 1 });
+    const n = numInput(t);
+    if (n > 0) aoMudar({ fracionado: true, fator: n });
+  };
+
+  const trocarUnidade = (u: string) => {
+    const f = it.fracionado ? fatorPara(det, u) : null;
+    if (f && f > 0) {
+      setTexto(String(arred4(f)).replace('.', ','));
+      aoMudar({ unidade_venda: u, fator: arred4(f) });
+    } else aoMudar({ unidade_venda: u });
+  };
+
+  const aviso = det.eh_embalagem && !it.fracionado;
+  const uProd = (it.produto?.unidade || '').toUpperCase();
+  const uv = it.fracionado ? it.unidade_venda : uNota;
+
+  return (
+    <div className={`mt-2 rounded-lg p-2 text-sm ${aviso ? 'bg-amber-50 ring-1 ring-amber-300' : it.fracionado ? 'bg-green-50' : 'bg-gray-50'}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-gray-600">{det.eh_embalagem ? `📦 Veio em ${det.nome.toLowerCase()}` : 'Fracionar'}</span>
+        <span className="text-gray-700">1 {uNota} =</span>
+        <input
+          className="w-20 rounded border border-gray-300 bg-white px-2 py-1 text-right text-sm"
+          inputMode="decimal"
+          placeholder="vazio"
+          value={texto}
+          onChange={(e) => digitar(e.target.value)}
+        />
+        <select
+          className="rounded border border-gray-300 bg-white px-1 py-1 text-sm disabled:opacity-50"
+          value={it.unidade_venda}
+          onChange={(e) => trocarUnidade(e.target.value)}
+          disabled={!it.fracionado}
+        >
+          {Array.from(new Set([...UNIDADES_VENDA, it.unidade_venda])).map((u) => (
+            <option key={u} value={u}>
+              {u}
+            </option>
+          ))}
+        </select>
+        {sugestoes.map((s) => (
+          <button
+            key={s.unidade}
+            type="button"
+            title={s.motivo}
+            onClick={() => aplicar(s.fator, s.unidade)}
+            className={`rounded-full px-2 py-0.5 text-xs ${
+              it.fracionado && it.fator === s.fator && it.unidade_venda === s.unidade
+                ? 'bg-green-600 text-white'
+                : 'bg-yellow-100 text-yellow-900 hover:bg-yellow-200'
+            }`}
+          >
+            💡 {n4(s.fator)} {s.unidade}
+            <span className="ml-1 opacity-70">({s.motivo})</span>
+          </button>
+        ))}
+        <span className="ml-auto text-xs text-gray-600">
+          {it.fracionado ? (
+            <>
+              entram <b>{n4(it.nfe.quantidade * it.fator)} {uv}</b> no estoque · custo <b>{brl(custo)}</b> por {uv}
+            </>
+          ) : (
+            <>vazio: entra como na nota, {n4(it.nfe.quantidade)} {uNota}</>
+          )}
+        </span>
+      </div>
+      {it.fracionado && it.fator !== 1 && (
+        <p className="mt-1 text-xs text-gray-600">
+          Conferência: {n4(it.nfe.quantidade)} {uNota} × {n4(it.fator)} = {n4(it.nfe.quantidade * it.fator)} {uv} × {brl(custo)} ={' '}
+          <b>{brl(arred2(it.nfe.quantidade * it.fator * custo))}</b> (total do item na nota {brl(it.nfe.custo_total)}). Os preços de venda abaixo já
+          estão calculados por {uv}.
+        </p>
+      )}
+      {aviso && (
+        <p className="mt-1 text-xs text-amber-800">
+          ⚠ Se você vende por unidade ou por peso, clique na sugestão ou informe quantas vêm em cada {uNota}. Deixando vazio, cada {uNota} conta como 1 no
+          estoque.
+        </p>
+      )}
+      {it.fracionado && !it.novo && uProd && uProd !== it.unidade_venda && (
+        <p className="mt-1 text-xs text-amber-800">
+          ⚠ O produto está cadastrado em {uProd}: o estoque dele é contado em {uProd}, não em {it.unidade_venda}.
+        </p>
+      )}
+      {it.fracionado && it.fator > 1 && eanDaCaixa && (
+        <p className="mt-1 text-xs text-amber-800">
+          ⚠ O código de barras {it.nfe.ean} é da embalagem ({uNota}). Confira o código da unidade antes de vender.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
 // CONFERÊNCIA DA NOTA (depois de escolher o XML)
 // =====================================================================
 function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: () => void }) {
@@ -394,15 +545,20 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
         nota.itens.map((i, idx) => {
           const v = p.itens.find((x) => x.idx === idx);
           const produto = v?.produto || null;
+          // fator lembrado da última nota deste produto (decisão sua de antes); senão, campo vazio = padrão da nota
+          const lembrado = Number(v?.fator) || 0;
           const base: ItemConf = {
             nfe: i,
             produto,
             vinculo: produto ? v!.vinculo : null,
             novo: !produto,
             nome_novo: i.descricao,
-            codigo_barras_novo: (i.fator_sugerido > 1 ? i.ean_trib : i.ean) || '',
+            codigo_barras_novo: i.ean || '',
             grupo: produto?.grupo || '',
-            fator: Number(v?.fator) || i.fator_sugerido || 1,
+            fator: lembrado > 0 && lembrado !== 1 ? lembrado : 1,
+            fracionado: lembrado > 0 && lembrado !== 1,
+            unidade_venda: (produto?.unidade || (lembrado > 1 ? 'UN' : i.unidade) || 'UN').toUpperCase(),
+            det: detectarEmbalagem(i.unidade, i.descricao, i.fator_sugerido),
             atualizar_precos: true,
             precos: [],
           };
@@ -459,7 +615,20 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
     if (resumo.semVinculo) return setErro('Há itens sem produto escolhido. Vincule a um produto ou marque como produto novo.');
     const semNome = itens.find((i) => i.novo && !i.nome_novo.trim());
     if (semNome) return setErro(`Informe o nome do produto novo do item ${semNome.nfe.item}.`);
-    if (!window.confirm(`Confirmar a entrada da NF ${nfe.numero}?\n\nO estoque será lançado e ${resumo.novos} produto(s) novo(s) serão cadastrados.`)) return;
+    const fracionados = itens.filter((i) => i.fracionado && i.fator !== 1);
+    const semFracionar = itens.filter((i) => i.det.eh_embalagem && !i.fracionado);
+    const aviso =
+      (fracionados.length
+        ? `\n\nFracionados:\n${fracionados
+            .map((i) => `• ${i.nfe.descricao}: 1 ${i.nfe.unidade} = ${n4(i.fator)} ${i.unidade_venda} → entram ${n4(i.nfe.quantidade * i.fator)} ${i.unidade_venda}`)
+            .join('\n')}`
+        : '') +
+      (semFracionar.length
+        ? `\n\n⚠ Vieram em embalagem e vão entrar como estão na nota (sem fracionar):\n${semFracionar
+            .map((i) => `• ${i.nfe.descricao}: ${n4(i.nfe.quantidade)} ${i.nfe.unidade}`)
+            .join('\n')}`
+        : '');
+    if (!window.confirm(`Confirmar a entrada da NF ${nfe.numero}?\n\nO estoque será lançado e ${resumo.novos} produto(s) novo(s) serão cadastrados.${aviso}`)) return;
     setConfirmando(true);
     setErro('');
     const payload = {
@@ -495,7 +664,8 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
         origem: it.nfe.origem,
         unidade: it.nfe.unidade,
         quantidade: it.nfe.quantidade,
-        fator: it.fator || 1,
+        fator: it.fracionado ? it.fator || 1 : 1,
+        unidade_venda: it.fracionado ? it.unidade_venda : it.nfe.unidade,
         valor_unitario: it.nfe.valor_unitario,
         valor_produtos: it.nfe.valor_produtos,
         frete: it.nfe.frete,
@@ -513,7 +683,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
               nome: it.nome_novo.trim(),
               codigo_barras: it.codigo_barras_novo || null,
               grupo: it.grupo.trim().toUpperCase() || null,
-              unidade: it.fator > 1 ? it.nfe.unidade_trib || 'UN' : it.nfe.unidade,
+              unidade: it.fracionado ? it.unidade_venda : it.nfe.unidade,
             }
           : null,
         atualizar_precos: it.novo || it.atualizar_precos,
@@ -660,7 +830,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="text-xs text-gray-500">Custo final por unidade</div>
+                  <div className="text-xs text-gray-500">Custo final por {it.fracionado ? it.unidade_venda : it.nfe.unidade}</div>
                   <div className="text-lg font-bold text-gray-800">{brl(custo)}</div>
                   {it.produto?.custo != null && Number(it.produto.custo) > 0 && (
                     <div className={`text-xs ${custo > Number(it.produto.custo) ? 'text-red-600' : 'text-green-600'}`}>
@@ -725,7 +895,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                     </div>
                   )}
                 </div>
-                <label className="block sm:col-span-3">
+                <label className="block sm:col-span-6">
                   <span className="text-xs text-gray-500">Grupo (margem)</span>
                   <input
                     list="grupos-margem"
@@ -736,21 +906,10 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                     title={!it.novo && it.produto?.grupo ? 'O grupo vem do cadastro do produto' : ''}
                   />
                 </label>
-                <label className="block sm:col-span-3">
-                  <span className="text-xs text-gray-500">
-                    Cada {it.nfe.unidade} tem quantas unidades?
-                  </span>
-                  <input
-                    className="w-full rounded border border-gray-300 px-2 py-1 text-right text-sm"
-                    inputMode="decimal"
-                    value={String(it.fator).replace('.', ',')}
-                    onChange={(e) => alterar(idx, { fator: numInput(e.target.value) || 1 }, 'manter')}
-                  />
-                  <span className="text-[11px] text-gray-500">
-                    entra {n4(it.nfe.quantidade * (it.fator || 1))} no estoque
-                  </span>
-                </label>
               </div>
+
+              {/* fracionamento: sugestão na frente do produto; vazio = entra como veio na nota */}
+              <Fracionar it={it} custo={custo} aoMudar={(m) => alterar(idx, m, 'manter')} />
 
               {/* preços */}
               <div className="mt-2 flex flex-wrap items-end gap-3">
