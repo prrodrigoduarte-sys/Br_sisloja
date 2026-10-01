@@ -14,7 +14,8 @@ type Usuario = {
   id: string;
   email: string;
   nome: string;
-  perfil: string;
+  perfil: string; // perfil de acesso (colaborador entra como gerente)
+  perfil_nome?: string; // perfil como está no cadastro, para mostrar no topo
   codigo_loja: string;
   loja_nome: string;
 };
@@ -79,7 +80,9 @@ export default function App() {
       id: user.id,
       email: user.email || '',
       nome: perfil.nome || user.email || '',
-      perfil: perfil.perfil || '',
+      // colaborador tem o mesmo acesso do gerente (só não entra no que exige a senha do administrador)
+      perfil: (perfil.perfil || '').toLowerCase() === 'colaborador' ? 'gerente' : perfil.perfil || '',
+      perfil_nome: perfil.perfil || '',
       codigo_loja: perfil.codigo_loja,
       loja_nome: loja?.nome || perfil.codigo_loja,
     });
@@ -165,7 +168,7 @@ export default function App() {
           <div>
             <h1 className="text-lg font-bold">SisLoja</h1>
             <p className="text-xs text-blue-200">
-              {usuario.loja_nome} · {usuario.nome} ({usuario.perfil})
+              {usuario.loja_nome} · {usuario.nome} ({usuario.perfil_nome || usuario.perfil})
             </p>
           </div>
           <button onClick={sair} className="text-sm bg-blue-800 hover:bg-blue-700 px-3 py-1 rounded">
