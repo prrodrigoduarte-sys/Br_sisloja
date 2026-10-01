@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
 import AjustePrecosModule from './AjustePrecosModule';
+import AjusteEstoqueModule from './AjusteEstoqueModule';
 
 // Produtos, tabelas de preço e estoque (físico / fiscal / administrativo).
 // Quem altera saldo é sempre a função movimentar_estoque do banco (fica registrado no histórico).
@@ -70,6 +71,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [carregando, setCarregando] = useState(true);
   const [msg, setMsg] = useState('');
   const [ajustandoPrecos, setAjustandoPrecos] = useState(false);
+  const [ajustandoEstoque, setAjustandoEstoque] = useState(false);
 
   // modal produto
   const [modalProduto, setModalProduto] = useState(false);
@@ -279,6 +281,18 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
     carregar();
   };
 
+  if (ajustandoEstoque) {
+    return (
+      <AjusteEstoqueModule
+        loggedUser={loggedUser}
+        aoVoltar={() => {
+          setAjustandoEstoque(false);
+          carregar();
+        }}
+      />
+    );
+  }
+
   if (ajustandoPrecos) {
     return (
       <AjustePrecosModule
@@ -302,6 +316,15 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
           <p className="text-xs text-slate-500">Valor do estoque (administrativo, a custo): <strong>{moeda(valorEstoque)}</strong></p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {podeCadastrar && (
+            <button
+              type="button"
+              onClick={() => setAjustandoEstoque(true)}
+              className="px-4 py-2.5 bg-orange-100 text-orange-900 rounded-xl font-bold text-sm cursor-pointer"
+            >
+              📋 Ajuste de estoque
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setAjustandoPrecos(true)}
