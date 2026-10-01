@@ -44,6 +44,7 @@ const TABELAS: Record<string, string> = {
   contas_receber: 'Contas a receber',
   perfis: 'Usuários',
   lojas: 'Loja',
+  ajustes_estoque: 'Ajustes de estoque',
 };
 
 const ACOES: Record<string, { rotulo: string; cor: string }> = {
@@ -88,7 +89,7 @@ function diferencas(r: Registro) {
 
 export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuario }) {
   const ehAdmin = (loggedUser?.perfil || '').toLowerCase() === 'admin';
-  const [sub, setSub] = useState<'registro' | 'usuarios'>('registro');
+  const [sub, setSub] = useState<'registro' | 'ajustes' | 'usuarios'>('registro');
   if (!ehAdmin) return <p className="p-6 text-center text-sm text-gray-500">Somente o administrador acessa as Configurações.</p>;
 
   return (
@@ -98,6 +99,7 @@ export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuari
         {(
           [
             ['registro', '📜 Registro de atividades'],
+            ['ajustes', '📦 Ajustes de estoque'],
             ['usuarios', '👥 Usuários'],
           ] as const
         ).map(([id, rot]) => (
@@ -111,6 +113,7 @@ export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuari
         ))}
       </div>
       {sub === 'registro' && <RegistroAtividades loggedUser={loggedUser} />}
+      {sub === 'ajustes' && <AjustesEstoque loggedUser={loggedUser} />}
       {sub === 'usuarios' && <Usuarios loggedUser={loggedUser} />}
     </div>
   );
@@ -324,6 +327,319 @@ function RegistroAtividades({ loggedUser }: { loggedUser: Usuario }) {
           })
         )}
       </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// AJUSTES DE ESTOQUE (relatório só do administrador)
+// =====================================================================
+type Ajuste = {
+  id: number;
+  produto_nome: string;
+  sku: string;
+  modo: string;
+  saldo_anterior: number;
+  quantidade: number;
+  saldo_novo: number;
+  custo_unitario: number | null;
+  valor: number | null;
+  motivo: string;
+  observacao: string | null;
+  usuario: string | null;
+  created_at: string;
+  excluido_em: string | null;
+  excluido_por: string | null;
+  motivo_exclusao: string | null;
+};
+
+function AjustesEstoque({ loggedUser }: { loggedUser: Usuario }) {
+  const [lista, setLista] = useState<Ajuste[]>([]);
+  const [versao, setVersao] = useState(0);
+  const [permiteExcluir, setPermiteExcluir] = useState<boolean | null>(null);
+  const [excluir, setExcluir] = useState<Ajuste | null>(null);
+  const [aviso, setAviso] = useState('');
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+  const [de, setDe] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toLocaleDateString('sv-SE');
+  });
+  const [ate, setAte] = useState(hoje());
+  const [usuario, setUsuario] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const [busca, setBusca] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      setErro('');
+      const { data, error } = await supabase
+        .from('ajustes_estoque')
+        .select('*')
+        .eq('codigo_loja', loggedUser.codigo_loja)
+        .gte('created_at', new Date(de + 'T00:00:00').toISOString())
+        .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
+        .order('created_at', { ascending: false })
+        .limit(5000);
+      if (error)
+        setErro(error.message.includes('ajustes_estoque') ? 'Falta atualizar o banco: rode o fase5_ajuste_estoque.sql no Supabase.' : 'Erro: ' + error.message);
+      setLista(((data as any[]) || []).map((x) => ({ ...x, quantidade: Number(x.quantidade), valor: x.valor == null ? null : Number(x.valor) })));
+      const { data: loja } = await supabase.from('lojas').select('permite_excluir_ajuste').eq('codigo_loja', loggedUser.codigo_loja).maybeSingle();
+      setPermiteExcluir(loja ? !!(loja as any).permite_excluir_ajuste : null);
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja, de, ate, versao]);
+
+  const alternarExclusao = async (v: boolean) => {
+    if (!v && !window.confirm('Desligar a exclusão de ajustes? Depois disso nenhum ajuste poderá ser excluído (até ligar de novo).')) return;
+    const { error } = await supabase.rpc('config_excluir_ajuste', { p_permitir: v });
+    if (error) return setErro('Não foi possível mudar: ' + error.message);
+    setPermiteExcluir(v);
+  };
+
+  const usuarios = useMemo(() => Array.from(new Set(lista.map((a) => a.usuario || '—'))).sort(), [lista]);
+  const motivos = useMemo(() => Array.from(new Set(lista.map((a) => a.motivo))).sort(), [lista]);
+
+  const filtrados = useMemo(() => {
+    const t = busca.trim().toLowerCase();
+    return lista.filter(
+      (a) =>
+        (!usuario || (a.usuario || '—') === usuario) &&
+        (!motivo || a.motivo === motivo) &&
+        (!t || a.produto_nome.toLowerCase().includes(t) || (a.sku || '').toLowerCase().includes(t))
+    );
+  }, [lista, usuario, motivo, busca]);
+
+  // ajustes excluídos aparecem riscados e não entram nos totais
+  const tot = useMemo(() => {
+    const validos = filtrados.filter((a) => !a.excluido_em);
+    const entrou = validos.filter((a) => a.quantidade > 0).reduce((s, a) => s + (a.valor || 0), 0);
+    const saiu = validos.filter((a) => a.quantidade < 0).reduce((s, a) => s + (a.valor || 0), 0);
+    return { qtd: validos.length, entrou, saiu, saldo: entrou + saiu };
+  }, [filtrados]);
+
+  const qtd = (n: number) => Number(n || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+
+  const exportarCsv = () => {
+    const sep = ';';
+    const n = (v: any) => String(v ?? '').replace('.', ',');
+    const cab = ['Data/hora', 'Usuário', 'Código', 'Produto', 'Tipo', 'Antes', 'Ajuste', 'Depois', 'Custo unit.', 'Valor', 'Motivo', 'Observação'];
+    const linhas = filtrados.map((a) =>
+      [dataHora(a.created_at), a.usuario || '', a.sku, a.produto_nome, a.modo, n(a.saldo_anterior), n(a.quantidade), n(a.saldo_novo), n(a.custo_unitario), n(a.valor), a.motivo, a.observacao || '']
+        .map((c) => `"${String(c).replace(/"/g, '""')}"`)
+        .join(sep)
+    );
+    const blob = new Blob(['﻿' + [cab.join(sep), ...linhas].join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `ajustes-estoque-${de}-a-${ate}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm">
+        de <input type="date" value={de} onChange={(e) => setDe(e.target.value)} className="rounded border px-2 py-1" />
+        até <input type="date" value={ate} onChange={(e) => setAte(e.target.value)} className="rounded border px-2 py-1" />
+        <select value={usuario} onChange={(e) => setUsuario(e.target.value)} className="rounded border px-2 py-1">
+          <option value="">Todos os usuários</option>
+          {usuarios.map((u) => (
+            <option key={u} value={u}>
+              {u}
+            </option>
+          ))}
+        </select>
+        <select value={motivo} onChange={(e) => setMotivo(e.target.value)} className="rounded border px-2 py-1">
+          <option value="">Todos os motivos</option>
+          {motivos.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Produto ou código" className="min-w-[150px] flex-1 rounded-lg border px-3 py-1" />
+        <button onClick={exportarCsv} disabled={!filtrados.length} className="rounded-lg border px-3 py-1 hover:bg-gray-50 disabled:opacity-40">
+          ⬇ Excel (CSV)
+        </button>
+        <button onClick={() => window.print()} className="rounded-lg border px-3 py-1 hover:bg-gray-50">
+          🖨 Imprimir
+        </button>
+      </div>
+
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+      {aviso && (
+        <p className="flex items-center rounded-lg bg-green-50 p-3 text-sm text-green-800">
+          <span className="flex-1">{aviso}</span>
+          <button onClick={() => setAviso('')}>✕</button>
+        </p>
+      )}
+
+      {permiteExcluir !== null && (
+        <div
+          className={`flex flex-wrap items-center gap-3 rounded-xl p-3 text-sm ${
+            permiteExcluir ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-gray-100 text-gray-700'
+          }`}
+        >
+          <label className="flex items-center gap-2 font-semibold">
+            <input type="checkbox" checked={permiteExcluir} onChange={(e) => alternarExclusao(e.target.checked)} className="h-4 w-4" />
+            Permitir excluir ajustes
+          </label>
+          <span className="text-xs">
+            {permiteExcluir
+              ? 'Ligado: o administrador pode excluir um ajuste lançado em duplicidade (o estoque volta ao que era). Desligue quando fechar o inventário.'
+              : 'Desligado: nenhum ajuste pode ser excluído.'}
+          </span>
+        </div>
+      )}
+
+      {excluir && (
+        <ExcluirAjuste
+          ajuste={excluir}
+          aoFechar={() => setExcluir(null)}
+          aoExcluir={(msg) => {
+            setExcluir(null);
+            setAviso(msg);
+            setVersao((v) => v + 1);
+          }}
+        />
+      )}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          ['Ajustes', String(tot.qtd), 'text-gray-800'],
+          ['Entrou (a custo)', brl(tot.entrou), 'text-green-700'],
+          ['Saiu (a custo)', brl(tot.saiu), 'text-red-700'],
+          ['Resultado', brl(tot.saldo), tot.saldo < 0 ? 'text-red-700' : 'text-green-700'],
+        ].map(([t, v, c]) => (
+          <div key={t} className="rounded-xl bg-white p-3 shadow-sm">
+            <div className="text-[11px] font-medium uppercase text-gray-500">{t}</div>
+            <div className={`text-lg font-bold ${c}`}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+        {carregando ? (
+          <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>
+        ) : !filtrados.length ? (
+          <p className="p-6 text-center text-sm text-gray-500">Nenhum ajuste no período.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b bg-gray-50 text-left text-[11px] uppercase text-gray-600">
+              <tr>
+                <th className="p-2">Data</th>
+                <th className="p-2">Usuário</th>
+                <th className="p-2">Produto</th>
+                <th className="p-2 text-right">Antes</th>
+                <th className="p-2 text-right">Ajuste</th>
+                <th className="p-2 text-right">Depois</th>
+                <th className="p-2 text-right">Valor</th>
+                <th className="p-2">Motivo</th>
+                {permiteExcluir && <th />}
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {filtrados.map((a) => (
+                <tr key={a.id} className={a.excluido_em ? 'bg-gray-50 text-gray-400 line-through' : ''}>
+                  <td className="p-2 whitespace-nowrap text-xs text-gray-500">{dataHora(a.created_at)}</td>
+                  <td className="p-2 whitespace-nowrap">{a.usuario || '—'}</td>
+                  <td className="p-2">
+                    <div className="font-medium text-gray-800">{a.produto_nome}</div>
+                    <div className="text-[10px] text-gray-400">
+                      Cód. {a.sku} · {a.modo === 'contagem' ? 'contagem' : 'soma/subtração'}
+                    </div>
+                  </td>
+                  <td className="p-2 text-right">{qtd(a.saldo_anterior)}</td>
+                  <td className={`p-2 text-right font-bold ${a.quantidade < 0 ? 'text-red-600' : 'text-green-700'}`}>
+                    {a.quantidade > 0 ? '+' : ''}
+                    {qtd(a.quantidade)}
+                  </td>
+                  <td className="p-2 text-right">{qtd(a.saldo_novo)}</td>
+                  <td className={`p-2 text-right whitespace-nowrap ${(a.valor || 0) < 0 ? 'text-red-600' : 'text-green-700'}`}>{brl(a.valor)}</td>
+                  <td className="p-2 text-xs">
+                    {a.motivo}
+                    {a.observacao && <div className="italic text-gray-500">{a.observacao}</div>}
+                    {a.excluido_em && (
+                      <div className="mt-1 inline-block rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700 no-underline" style={{ textDecoration: 'none' }}>
+                        EXCLUÍDO por {a.excluido_por} em {dataHora(a.excluido_em)}
+                        {a.motivo_exclusao ? ` · ${a.motivo_exclusao}` : ''}
+                      </div>
+                    )}
+                  </td>
+                  {permiteExcluir && (
+                    <td className="p-2 text-right" style={{ textDecoration: 'none' }}>
+                      {!a.excluido_em && (
+                        <button onClick={() => setExcluir(a)} className="rounded border border-red-300 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50">
+                          Excluir
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExcluirAjuste({ ajuste, aoFechar, aoExcluir }: { ajuste: Ajuste; aoFechar: () => void; aoExcluir: (msg: string) => void }) {
+  const [motivo, setMotivo] = useState('Lançado em duplicidade');
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState('');
+  const [excluindo, setExcluindo] = useState(false);
+  const q = (n: number) => Number(n || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+
+  const confirmar = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!senha) return setErro('Digite a sua senha de administrador.');
+    setExcluindo(true);
+    setErro('');
+    const { error } = await supabase.rpc('excluir_ajuste_estoque', { p_id: ajuste.id, p_senha: senha, p_motivo: motivo.trim() });
+    setExcluindo(false);
+    setSenha('');
+    if (error) return setErro(error.message);
+    aoExcluir(`Ajuste de "${ajuste.produto_nome}" excluído. O estoque voltou ${ajuste.quantidade > 0 ? '−' : '+'}${q(Math.abs(ajuste.quantidade))}.`);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-8" onMouseDown={aoFechar}>
+      <form onSubmit={confirmar} onMouseDown={(e) => e.stopPropagation()} className="w-full max-w-md space-y-3 rounded-xl bg-white p-5 text-sm shadow-xl">
+        <h3 className="text-lg font-bold text-red-700">Excluir ajuste de estoque</h3>
+        <div className="rounded-lg bg-gray-50 p-3">
+          <p className="font-medium">{ajuste.produto_nome}</p>
+          <p className="text-xs text-gray-500">
+            {dataHora(ajuste.created_at)} · por {ajuste.usuario || '—'} · {q(ajuste.saldo_anterior)} → {q(ajuste.saldo_novo)} ({ajuste.quantidade > 0 ? '+' : ''}
+            {q(ajuste.quantidade)})
+          </p>
+        </div>
+        <p className="text-xs text-gray-600">
+          O estoque recebe o contrário deste ajuste ({ajuste.quantidade > 0 ? '−' : '+'}
+          {q(Math.abs(ajuste.quantidade))}). O registro continua no relatório, riscado.
+        </p>
+        <label className="block">
+          <span className="text-gray-600">Motivo</span>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" />
+        </label>
+        <label className="block">
+          <span className="text-gray-600">Sua senha de administrador</span>
+          <input type="password" autoComplete="off" value={senha} onChange={(e) => setSenha(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" />
+        </label>
+        {erro && <p className="rounded-lg bg-red-50 p-2 text-red-700">{erro}</p>}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={aoFechar} className="rounded-lg px-4 py-2 text-gray-600 hover:bg-gray-100">
+            Voltar
+          </button>
+          <button type="submit" disabled={excluindo} className="rounded-lg bg-red-600 px-4 py-2 font-semibold text-white disabled:opacity-50">
+            {excluindo ? 'Excluindo…' : 'Excluir ajuste'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
