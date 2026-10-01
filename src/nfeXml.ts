@@ -1,6 +1,6 @@
 // BR Sisloja - Fase 2
 // Leitura do XML da NF-e (modelo 55) no navegador e rateio das despesas da nota no custo de cada item.
- 
+
 export type NfeEndereco = {
     logradouro: string;
     numero: string;
@@ -12,7 +12,7 @@ export type NfeEndereco = {
     cep: string;
     telefone: string;
   };
-   
+  
   export type NfeEmitente = {
     cnpj_cpf: string;
     razao_social: string;
@@ -21,7 +21,7 @@ export type NfeEndereco = {
     crt: string; // 1 = Simples Nacional, 2 = Simples excesso, 3 = Regime normal, 4 = MEI
     endereco: NfeEndereco;
   };
-   
+  
   export type NfeItem = {
     item: number;
     codigo_fornecedor: string;
@@ -50,9 +50,9 @@ export type NfeEndereco = {
     custo_total: number; // valor_produtos + frete + seguro + outras + ipi + st - desconto
     custo_unitario: number; // custo_total / quantidade (na unidade do fornecedor)
   };
-   
+  
   export type NfeDuplicata = { numero: string; vencimento: string; valor: number };
-   
+  
   export type Nfe = {
     chave: string;
     numero: string;
@@ -76,14 +76,14 @@ export type NfeEndereco = {
       nota: number;
     };
   };
-   
+  
   const num = (v: string | null | undefined) => {
     const n = parseFloat((v || '').replace(',', '.'));
     return isFinite(n) ? n : 0;
   };
   const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
   const r4 = (n: number) => Math.round((n + Number.EPSILON) * 10000) / 10000;
-   
+  
   // pega o primeiro elemento com esse nome (ignora namespace)
   function el(pai: Element | Document | null | undefined, nome: string): Element | null {
     if (!pai) return null;
@@ -110,11 +110,11 @@ export type NfeEndereco = {
   function ftxt(pai: Element | null, nome: string): string {
     return (filho(pai, nome)?.textContent || '').trim();
   }
-   
+  
   export function somenteDigitos(s: string) {
     return (s || '').replace(/\D/g, '');
   }
-   
+  
   // EAN válido? (8, 12, 13 ou 14 dígitos; "SEM GTIN" e zeros são ignorados)
   export function eanValido(s: string) {
     const d = somenteDigitos(s);
@@ -122,9 +122,9 @@ export type NfeEndereco = {
     if (/^0+$/.test(d)) return '';
     return d;
   }
-   
+  
   export function lerNfe(xmlTexto: string): Nfe {
-    const doc = new DOMParser().parseFromString(xmlTexto.replace(/^﻿/, ''), 'text/xml');
+    const doc = new DOMParser().parseFromString(xmlTexto.replace(/^\uFEFF/, ''), 'text/xml');
     if (doc.getElementsByTagName('parsererror').length) {
       throw new Error('O arquivo não é um XML válido.');
     }
@@ -134,16 +134,16 @@ export type NfeEndereco = {
       if (el(doc, 'resNFe')) throw new Error('Este XML é só o resumo da nota. Baixe o XML completo (procNFe) com o fornecedor.');
       throw new Error('Não encontrei uma NF-e neste XML.');
     }
-   
+  
     let chave = somenteDigitos(infNFe.getAttribute('Id') || '');
     if (chave.length !== 44) chave = somenteDigitos(txt(doc, 'chNFe'));
     if (chave.length !== 44) throw new Error('Não encontrei a chave de acesso (44 dígitos) neste XML.');
-   
+  
     const ide = el(infNFe, 'ide');
     const emit = el(infNFe, 'emit');
     const enderEmit = el(emit, 'enderEmit');
     const dest = el(infNFe, 'dest');
-   
+  
     const emitente: NfeEmitente = {
       cnpj_cpf: somenteDigitos(ftxt(emit, 'CNPJ') || ftxt(emit, 'CPF')),
       razao_social: ftxt(emit, 'xNome'),
@@ -162,9 +162,9 @@ export type NfeEndereco = {
         telefone: somenteDigitos(ftxt(enderEmit, 'fone')),
       },
     };
-   
+  
     const dhEmi = ftxt(ide, 'dhEmi') || ftxt(ide, 'dEmi');
-   
+  
     const itens: NfeItem[] = els(infNFe, 'det').map((det, i) => {
       const prod = filho(det, 'prod');
       const imposto = filho(det, 'imposto');
@@ -207,7 +207,7 @@ export type NfeEndereco = {
       };
     });
     if (!itens.length) throw new Error('A nota não tem itens.');
-   
+  
     const icmsTot = el(el(infNFe, 'total'), 'ICMSTot');
     const totais = {
       produtos: num(ftxt(icmsTot, 'vProd')),
@@ -220,9 +220,9 @@ export type NfeEndereco = {
       icms: num(ftxt(icmsTot, 'vICMS')),
       nota: num(ftxt(icmsTot, 'vNF')),
     };
-   
+  
     ratearDespesas(itens, totais);
-   
+  
     const cobr = el(infNFe, 'cobr');
     let duplicatas: NfeDuplicata[] = els(cobr, 'dup').map((d) => ({
       numero: ftxt(d, 'nDup'),
@@ -230,7 +230,7 @@ export type NfeEndereco = {
       valor: num(ftxt(d, 'vDup')),
     }));
     duplicatas = duplicatas.filter((d) => d.valor > 0);
-   
+  
     return {
       chave,
       numero: ftxt(ide, 'nNF'),
@@ -245,7 +245,7 @@ export type NfeEndereco = {
       totais,
     };
   }
-   
+  
   // Rateio: a NF-e normalmente já traz frete/seguro/desconto/outras por item.
   // Se a soma dos itens não bater com o total da nota, a diferença é dividida
   // proporcionalmente ao valor dos produtos de cada item.
@@ -268,17 +268,18 @@ export type NfeEndereco = {
       it.custo_unitario = it.quantidade > 0 ? r4(it.custo_total / it.quantidade) : 0;
     }
   }
-   
+  
   // Preço de venda = custo x (1 + margem%), arredondado em centavos
   export function precoComMargem(custo: number, margemPercentual: number) {
     return r2(custo * (1 + (margemPercentual || 0) / 100));
   }
-   
+  
   // Margem real de um preço digitado à mão
   export function margemDoPreco(custo: number, preco: number) {
     if (!custo) return 0;
     return r2((preco / custo - 1) * 100);
   }
-   
+  
   export const arred2 = r2;
   export const arred4 = r4;
+  
