@@ -1,0 +1,516 @@
+-- BR SISLOJA — EXCLUIR NOTA DE ENTRADA (com senha do administrador) + guardar custo/preço anterior
+-- Rode TUDO de uma vez no SQL Editor. Pode rodar mais de uma vez.
+-- Precisa do fase3_auditoria.sql já rodado.
+
+-- 1) Os itens da nota passam a guardar como o produto estava ANTES da nota (para poder desfazer)
+alter table public.notas_entrada_itens add column if not exists custo_anterior       numeric;
+alter table public.notas_entrada_itens add column if not exists preco_venda_anterior numeric;
+alter table public.notas_entrada_itens add column if not exists precos_anteriores    jsonb;   -- [{tabela_id, preco}]
+alter table public.notas_entrada_itens add column if not exists unidade_venda        text;
+
+-- 2) Entrada da nota: mesma lógica de antes + guarda custo/preços anteriores e a unidade de venda
+create or replace function public.confirmar_nota_entrada(p_nota jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+  v_loja text := public.minha_loja();
+  v_chave text := regexp_replace(coalesce(p_nota->>'chave', ''), '\D', '', 'g');
+  v_f jsonb := p_nota->'fornecedor';
+  v_cnpj text := nullif(regexp_replace(coalesce(p_nota->'fornecedor'->>'cnpj_cpf', ''), '\D', '', 'g'), '');
+  v_forn public.fornecedores%rowtype;
+  v_forn_criado boolean := false;
+  v_nota_id uuid;
+  v_status text;
+  v_it jsonb;
+  v_np jsonb;
+  v_pr jsonb;
+  v_prod uuid;
+  v_qtd numeric;
+  v_fator numeric;
+  v_custo numeric;
+  v_sku text;
+  v_tabela uuid;
+  v_preco_padrao numeric;
+  v_obs text;
+  v_n_itens int := 0;
+  v_n_novos int := 0;
+  v_n_contas int := 0;
+  v_dup jsonb;
+  v_ndup int;
+  v_total_nota numeric := coalesce((p_nota->'totais'->>'nota')::numeric, 0);
+  v_data_entrada date := coalesce(nullif(p_nota->>'data_entrada', '')::date, current_date);
+  v_custo_ant numeric;
+  v_preco_ant numeric;
+  v_precos_ant jsonb;
+  v_novo boolean;
+begin
+  if v_loja is null then
+    raise exception 'Usuário sem loja';
+  end if;
+  if public.meu_perfil() not in ('admin', 'gerente', 'estoquista') then
+    raise exception 'Sem permissão para lançar nota de entrada';
+  end if;
+  if coalesce(p_nota->>'codigo_loja', v_loja) <> v_loja then
+    raise exception 'Loja inválida';
+  end if;
+  if length(v_chave) <> 44 then
+    raise exception 'Chave de acesso inválida';
+  end if;
+  if jsonb_array_length(coalesce(p_nota->'itens', '[]'::jsonb)) = 0 then
+    raise exception 'Nota sem itens';
+  end if;
+
+  -- 1) nota já lançada?
+  select id, status into v_nota_id, v_status
+    from public.notas_entrada
+   where codigo_loja = v_loja and chave_acesso = v_chave
+   for update;
+  if v_status = 'lancada' then
+    raise exception 'Esta nota já foi lançada';
+  end if;
+
+  -- 2) fornecedor: acha pelo CNPJ ou cadastra
+  if v_cnpj is not null then
+    select * into v_forn from public.fornecedores where codigo_loja = v_loja and cnpj = v_cnpj limit 1;
+  end if;
+  if v_forn.id is null then
+    insert into public.fornecedores (codigo_loja, nome, cnpj, nome_fantasia, ie, crt, telefone, cep, logradouro, numero,
+                                     complemento, bairro, cidade, codigo_municipio, uf, origem)
+    values (v_loja,
+            coalesce(nullif(v_f->>'razao_social', ''), 'Fornecedor ' || coalesce(v_cnpj, '')),
+            v_cnpj,
+            nullif(v_f->>'nome_fantasia', ''), nullif(v_f->>'ie', ''), nullif(v_f->>'crt', ''), nullif(v_f->>'telefone', ''),
+            nullif(v_f->>'cep', ''), nullif(v_f->>'logradouro', ''), nullif(v_f->>'numero', ''), nullif(v_f->>'complemento', ''),
+            nullif(v_f->>'bairro', ''), nullif(v_f->>'cidade', ''), nullif(v_f->>'codigo_municipio', ''), nullif(v_f->>'uf', ''),
+            'xml')
+    returning * into v_forn;
+    v_forn_criado := true;
+  else
+    -- completa o que estiver em branco no cadastro
+    update public.fornecedores set
+      nome_fantasia    = coalesce(nome_fantasia, nullif(v_f->>'nome_fantasia', '')),
+      ie               = coalesce(ie, nullif(v_f->>'ie', '')),
+      crt              = coalesce(crt, nullif(v_f->>'crt', '')),
+      telefone         = coalesce(telefone, nullif(v_f->>'telefone', '')),
+      cep              = coalesce(cep, nullif(v_f->>'cep', '')),
+      logradouro       = coalesce(logradouro, nullif(v_f->>'logradouro', '')),
+      numero           = coalesce(numero, nullif(v_f->>'numero', '')),
+      bairro           = coalesce(bairro, nullif(v_f->>'bairro', '')),
+      cidade           = coalesce(cidade, nullif(v_f->>'cidade', '')),
+      codigo_municipio = coalesce(codigo_municipio, nullif(v_f->>'codigo_municipio', '')),
+      uf               = coalesce(uf, nullif(v_f->>'uf', ''))
+    where id = v_forn.id;
+  end if;
+
+  -- 3) cabeçalho da nota
+  if v_nota_id is null then
+    insert into public.notas_entrada (codigo_loja, chave_acesso, origem, status)
+    values (v_loja, v_chave, 'xml', 'pendente')
+    returning id into v_nota_id;
+  else
+    delete from public.notas_entrada_itens where nota_id = v_nota_id;
+  end if;
+
+  update public.notas_entrada set
+    fornecedor_id  = v_forn.id,
+    numero         = p_nota->>'numero',
+    serie          = p_nota->>'serie',
+    modelo         = p_nota->>'modelo',
+    natureza       = p_nota->>'natureza',
+    data_emissao   = nullif(p_nota->>'data_emissao', '')::date,
+    data_entrada   = v_data_entrada,
+    valor_produtos = coalesce((p_nota->'totais'->>'produtos')::numeric, 0),
+    valor_frete    = coalesce((p_nota->'totais'->>'frete')::numeric, 0),
+    valor_seguro   = coalesce((p_nota->'totais'->>'seguro')::numeric, 0),
+    valor_desconto = coalesce((p_nota->'totais'->>'desconto')::numeric, 0),
+    valor_outras   = coalesce((p_nota->'totais'->>'outras')::numeric, 0),
+    valor_ipi      = coalesce((p_nota->'totais'->>'ipi')::numeric, 0),
+    valor_st       = coalesce((p_nota->'totais'->>'st')::numeric, 0),
+    valor_icms     = coalesce((p_nota->'totais'->>'icms')::numeric, 0),
+    valor_total    = v_total_nota,
+    qtd_itens      = jsonb_array_length(p_nota->'itens'),
+    origem         = 'xml',
+    xml            = p_nota->>'xml',
+    usuario_id     = auth.uid()
+  where id = v_nota_id;
+
+  v_obs := 'NF-e ' || coalesce(p_nota->>'numero', '') || ' - ' || coalesce(v_forn.nome_fantasia, v_forn.nome);
+
+  -- 4) itens
+  for v_it in select * from jsonb_array_elements(p_nota->'itens') loop
+    v_fator := greatest(coalesce((v_it->>'fator')::numeric, 1), 0.0001);
+    v_qtd := round(coalesce((v_it->>'quantidade')::numeric, 0) * v_fator, 3);
+    if v_qtd <= 0 then
+      raise exception 'Quantidade inválida no item %', v_it->>'item';
+    end if;
+    v_custo := round(coalesce((v_it->>'custo_total')::numeric, 0) / v_qtd, 4);
+    v_prod := nullif(v_it->>'produto_id', '')::uuid;
+    v_np := v_it->'novo_produto';
+    v_novo := false;
+    v_custo_ant := null;
+    v_preco_ant := null;
+    v_precos_ant := null;
+
+    if v_prod is not null then
+      if not exists (select 1 from public.produtos where id = v_prod and codigo_loja = v_loja) then
+        raise exception 'Produto do item % não encontrado', v_it->>'item';
+      end if;
+      -- como o produto estava antes desta nota
+      select custo, preco_venda into v_custo_ant, v_preco_ant from public.produtos where id = v_prod;
+      select coalesce(jsonb_agg(jsonb_build_object('tabela_id', tabela_id, 'preco', preco)), '[]'::jsonb)
+        into v_precos_ant
+        from public.precos_produto where produto_id = v_prod;
+    elsif v_np is not null and jsonb_typeof(v_np) = 'object' then
+      -- produto novo: SKU = código de barras (se livre) ou o próximo número
+      v_sku := nullif(v_np->>'codigo_barras', '');
+      if v_sku is null or exists (select 1 from public.produtos where codigo_loja = v_loja and sku = v_sku) then
+        select (coalesce(max(sku::bigint), 0) + 1)::text into v_sku
+          from public.produtos
+         where codigo_loja = v_loja and sku ~ '^\d{1,9}$';
+      end if;
+      insert into public.produtos (codigo_loja, sku, codigo_barras, nome, unidade, custo, preco_venda, ncm, cest, origem, grupo)
+      values (v_loja, v_sku, nullif(v_np->>'codigo_barras', ''),
+              coalesce(nullif(trim(v_np->>'nome'), ''), v_it->>'descricao'),
+              coalesce(nullif(v_np->>'unidade', ''), 'UN'),
+              v_custo, 0,
+              nullif(v_it->>'ncm', ''), nullif(v_it->>'cest', ''), nullif(v_it->>'origem', ''),
+              nullif(upper(trim(v_np->>'grupo')), ''))
+      returning id into v_prod;
+      v_n_novos := v_n_novos + 1;
+      v_novo := true;
+    else
+      raise exception 'Item % sem produto', v_it->>'item';
+    end if;
+
+    -- custo do produto = custo desta nota (com frete, IPI, ST etc.); fiscais preenchidos se vazios
+    update public.produtos set
+      custo  = v_custo,
+      ncm    = coalesce(ncm, nullif(v_it->>'ncm', '')),
+      cest   = coalesce(cest, nullif(v_it->>'cest', '')),
+      origem = coalesce(origem, nullif(v_it->>'origem', '')),
+      grupo  = coalesce(grupo, nullif(upper(trim(v_np->>'grupo')), ''))
+    where id = v_prod;
+
+    -- preços de venda
+    v_preco_padrao := null;
+    if coalesce((v_it->>'atualizar_precos')::boolean, false) then
+      for v_pr in select * from jsonb_array_elements(coalesce(v_it->'precos', '[]'::jsonb)) loop
+        if coalesce((v_pr->>'preco')::numeric, 0) <= 0 then
+          continue;
+        end if;
+        if v_pr->>'tabela_id' = 'padrao' then
+          update public.produtos set preco_venda = round((v_pr->>'preco')::numeric, 2) where id = v_prod;
+          v_preco_padrao := round((v_pr->>'preco')::numeric, 2);
+        else
+          v_tabela := (v_pr->>'tabela_id')::uuid;
+          if exists (select 1 from public.tabelas_preco where id = v_tabela and codigo_loja = v_loja) then
+            insert into public.precos_produto (codigo_loja, tabela_id, produto_id, preco)
+            values (v_loja, v_tabela, v_prod, round((v_pr->>'preco')::numeric, 2))
+            on conflict (tabela_id, produto_id) do update set preco = excluded.preco;
+          end if;
+        end if;
+      end loop;
+    end if;
+
+    -- estoque: nota fiscal de compra entra no físico, no administrativo e no fiscal
+    perform public._mov_estoque(v_loja, v_prod, 'fisico',         v_qtd, 'entrada', v_custo, v_obs, 'nota_entrada', v_nota_id);
+    perform public._mov_estoque(v_loja, v_prod, 'administrativo', v_qtd, 'entrada', v_custo, v_obs, 'nota_entrada', v_nota_id);
+    perform public._mov_estoque(v_loja, v_prod, 'fiscal',         v_qtd, 'entrada', v_custo, v_obs, 'nota_entrada', v_nota_id);
+
+    -- lembra o vínculo código do fornecedor -> produto (e o fracionamento)
+    if coalesce(v_it->>'codigo_fornecedor', '') <> '' then
+      insert into public.produto_fornecedor (codigo_loja, fornecedor_id, codigo_fornecedor, produto_id, fator, ultimo_custo, atualizado_em)
+      values (v_loja, v_forn.id, v_it->>'codigo_fornecedor', v_prod, v_fator, v_custo, now())
+      on conflict (codigo_loja, fornecedor_id, codigo_fornecedor) do update set
+        produto_id = excluded.produto_id, fator = excluded.fator, ultimo_custo = excluded.ultimo_custo, atualizado_em = now();
+    end if;
+
+    insert into public.notas_entrada_itens (
+      codigo_loja, nota_id, produto_id, produto_novo, item, codigo_fornecedor, ean, descricao, ncm, cest, cfop, unidade,
+      quantidade, fator, quantidade_estoque, valor_unitario, valor_produtos, frete, seguro, desconto, outras, ipi, st, icms,
+      custo_unitario, total, preco_venda, precos,
+      custo_anterior, preco_venda_anterior, precos_anteriores, unidade_venda)
+    values (
+      v_loja, v_nota_id, v_prod, v_novo, (v_it->>'item')::int, v_it->>'codigo_fornecedor', nullif(v_it->>'ean', ''),
+      v_it->>'descricao', v_it->>'ncm', v_it->>'cest', v_it->>'cfop', v_it->>'unidade',
+      (v_it->>'quantidade')::numeric, v_fator, v_qtd, (v_it->>'valor_unitario')::numeric, (v_it->>'valor_produtos')::numeric,
+      coalesce((v_it->>'frete')::numeric, 0), coalesce((v_it->>'seguro')::numeric, 0), coalesce((v_it->>'desconto')::numeric, 0),
+      coalesce((v_it->>'outras')::numeric, 0), coalesce((v_it->>'ipi')::numeric, 0), coalesce((v_it->>'st')::numeric, 0),
+      coalesce((v_it->>'icms')::numeric, 0),
+      v_custo, coalesce((v_it->>'custo_total')::numeric, 0),
+      coalesce(v_preco_padrao, (select preco_venda from public.produtos where id = v_prod)),
+      case when coalesce((v_it->>'atualizar_precos')::boolean, false) then v_it->'precos' else null end,
+      v_custo_ant, v_preco_ant, v_precos_ant, nullif(v_it->>'unidade_venda', ''));
+    v_n_itens := v_n_itens + 1;
+  end loop;
+
+  -- 5) contas a pagar (duplicatas da nota, ou uma conta com o total no prazo do fornecedor / 30 dias)
+  if coalesce((p_nota->>'gerar_contas')::boolean, true) then
+    v_ndup := jsonb_array_length(coalesce(p_nota->'duplicatas', '[]'::jsonb));
+    if v_ndup > 0 then
+      for v_dup in select * from jsonb_array_elements(p_nota->'duplicatas') loop
+        if coalesce((v_dup->>'valor')::numeric, 0) <= 0 then
+          continue;
+        end if;
+        insert into public.contas_pagar (codigo_loja, fornecedor_id, descricao, valor, vencimento, origem, origem_id)
+        values (v_loja, v_forn.id,
+                'NF ' || coalesce(p_nota->>'numero', '') || ' parc. ' || coalesce(nullif(v_dup->>'numero', ''), '1')
+                  || ' - ' || coalesce(v_forn.nome_fantasia, v_forn.nome),
+                round((v_dup->>'valor')::numeric, 2),
+                coalesce(nullif(v_dup->>'vencimento', '')::date, v_data_entrada + 30),
+                'nota_entrada', v_nota_id);
+        v_n_contas := v_n_contas + 1;
+      end loop;
+    elsif v_total_nota > 0 then
+      insert into public.contas_pagar (codigo_loja, fornecedor_id, descricao, valor, vencimento, origem, origem_id)
+      values (v_loja, v_forn.id,
+              'NF ' || coalesce(p_nota->>'numero', '') || ' - ' || coalesce(v_forn.nome_fantasia, v_forn.nome),
+              round(v_total_nota, 2),
+              v_data_entrada + coalesce(v_forn.prazo_pagamento_dias, 30),
+              'nota_entrada', v_nota_id);
+      v_n_contas := 1;
+    end if;
+  end if;
+
+  update public.notas_entrada set status = 'lancada' where id = v_nota_id;
+
+  return jsonb_build_object('nota_id', v_nota_id, 'fornecedor_criado', v_forn_criado, 'itens', v_n_itens,
+                            'produtos_criados', v_n_novos, 'contas_criadas', v_n_contas);
+end
+$function$;
+
+-- 3) EXCLUIR NOTA DE ENTRADA — exige a senha de login de um administrador ativo da loja
+create or replace function public.excluir_nota_entrada(p_nota_id uuid, p_senha text, p_motivo text)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+  v_loja text := public.minha_loja();
+  v_nota public.notas_entrada%rowtype;
+  v_forn public.fornecedores%rowtype;
+  v_obs text;
+  v_mov record;
+  v_it record;
+  v_ant record;
+  v_pr jsonb;
+  v_itens jsonb;
+  v_n_mov int := 0;
+  v_n_prod_del int := 0;
+  v_n_prod_mantidos int := 0;
+  v_n_custos int := 0;
+  v_n_contas int := 0;
+  v_forn_del boolean := false;
+  v_negativos int := 0;
+  v_tipo_mov text;
+  v_regra text;
+begin
+  if v_loja is null then
+    raise exception 'Usuário sem loja';
+  end if;
+  if length(trim(coalesce(p_motivo, ''))) < 5 then
+    raise exception 'Informe o motivo da exclusão';
+  end if;
+
+  select * into v_nota from public.notas_entrada where id = p_nota_id and codigo_loja = v_loja for update;
+  if v_nota.id is null then
+    raise exception 'Nota não encontrada';
+  end if;
+
+  -- senha de qualquer administrador ativo desta loja
+  if not exists (
+    select 1
+      from public.perfis p
+      join auth.users u on u.id = p.user_id
+     where p.codigo_loja = v_loja
+       and lower(p.perfil) = 'admin'
+       and p.ativo
+       and u.encrypted_password = extensions.crypt(coalesce(p_senha, ''), u.encrypted_password)
+  ) then
+    perform pg_sleep(1);
+    raise exception 'Senha do administrador incorreta';
+  end if;
+
+  if exists (select 1 from public.contas_pagar
+              where origem = 'nota_entrada' and origem_id = v_nota.id and status = 'pago') then
+    raise exception 'Esta nota tem parcela(s) já paga(s) no Contas a Pagar. Reabra o pagamento antes de excluir a nota.';
+  end if;
+
+  -- tudo o que for alterado/excluído daqui em diante sai no registro de atividades com este motivo
+  perform set_config('app.motivo', 'Exclusão da NF ' || coalesce(v_nota.numero, '') || ': ' || trim(p_motivo), true);
+  perform set_config('app.codigo_loja', v_loja, true);
+
+  select * into v_forn from public.fornecedores where id = v_nota.fornecedor_id;
+  v_obs := 'Exclusão da NF-e ' || coalesce(v_nota.numero, '') || ' - ' || coalesce(v_forn.nome_fantasia, v_forn.nome, '');
+
+  select coalesce(jsonb_agg(to_jsonb(i) - 'codigo_loja' order by i.item), '[]'::jsonb)
+    into v_itens
+    from public.notas_entrada_itens i where i.nota_id = v_nota.id;
+
+  -- resumo da exclusão no registro de atividades
+  insert into public.auditoria (codigo_loja, user_id, usuario, acao, tabela, registro_id, descricao, motivo, antes)
+  values (v_loja, auth.uid(), public.auditoria_usuario(), 'exclusao_nota_entrada', 'notas_entrada', v_nota.id::text,
+          'NF ' || coalesce(v_nota.numero, '') || ' - ' || coalesce(v_forn.nome_fantasia, v_forn.nome, '')
+            || ' - R$ ' || to_char(coalesce(v_nota.valor_total, 0), 'FM999G999G990D00'),
+          trim(p_motivo),
+          (to_jsonb(v_nota) - 'xml') || jsonb_build_object('itens', v_itens));
+
+  -- 1) estoque: lança o contrário de tudo o que a nota lançou (físico, administrativo e fiscal)
+  -- o tipo de movimento usado é o primeiro que a tabela aceita: estorno, ajuste ou saida
+  select coalesce(string_agg(pg_get_constraintdef(c.oid), ' '), '') into v_regra
+    from pg_constraint c
+   where c.conrelid = 'public.estoque_movimentos'::regclass and c.contype = 'c'
+     and pg_get_constraintdef(c.oid) like '%tipo_mov%';
+  v_tipo_mov := case
+    when v_regra = '' or v_regra like '%''estorno''%' then 'estorno'
+    when v_regra like '%''ajuste''%' then 'ajuste'
+    when v_regra like '%''saída''%' then 'saída'
+    else 'saida'
+  end;
+
+  for v_mov in
+    select produto_id, tipo_estoque, sum(quantidade) as qtd, max(custo_unitario) as custo
+      from public.estoque_movimentos
+     where origem = 'nota_entrada' and origem_id = v_nota.id
+     group by produto_id, tipo_estoque
+  loop
+    if v_mov.qtd <> 0 then
+      perform public._mov_estoque(v_loja, v_mov.produto_id, v_mov.tipo_estoque, -v_mov.qtd, v_tipo_mov, v_mov.custo, v_obs,
+                                  'nota_entrada_exclusao', v_nota.id);
+      v_n_mov := v_n_mov + 1;
+    end if;
+  end loop;
+
+  -- 2) custo e preços voltam ao que eram (só se nenhuma nota posterior mexeu no produto)
+  for v_it in
+    select distinct on (produto_id) *
+      from public.notas_entrada_itens
+     where nota_id = v_nota.id and not coalesce(produto_novo, false)
+     order by produto_id, item
+  loop
+    if exists (select 1 from public.estoque_movimentos m
+                where m.produto_id = v_it.produto_id and m.tipo_mov = 'entrada' and m.origem = 'nota_entrada'
+                  and m.origem_id <> v_nota.id and m.created_at > v_nota.created_at) then
+      continue; -- outra nota mais nova já definiu custo/preço: não mexe
+    end if;
+
+    if v_it.custo_anterior is not null then
+      update public.produtos set custo = v_it.custo_anterior, preco_venda = coalesce(v_it.preco_venda_anterior, preco_venda)
+       where id = v_it.produto_id;
+      -- tabelas de preço: volta o valor anterior; se não existia, apaga
+      for v_pr in select * from jsonb_array_elements(coalesce(v_it.precos, '[]'::jsonb)) loop
+        if v_pr->>'tabela_id' = 'padrao' or coalesce(v_pr->>'tabela_id', '') = '' then
+          continue;
+        end if;
+        select (x->>'preco')::numeric as preco into v_ant
+          from jsonb_array_elements(coalesce(v_it.precos_anteriores, '[]'::jsonb)) x
+         where x->>'tabela_id' = v_pr->>'tabela_id';
+        if found and v_ant.preco is not null then
+          update public.precos_produto set preco = v_ant.preco
+           where produto_id = v_it.produto_id and tabela_id = (v_pr->>'tabela_id')::uuid;
+        else
+          delete from public.precos_produto
+           where produto_id = v_it.produto_id and tabela_id = (v_pr->>'tabela_id')::uuid;
+        end if;
+      end loop;
+      v_n_custos := v_n_custos + 1;
+    else
+      -- nota lançada antes desta atualização: custo volta ao da entrada anterior (histórico de estoque)
+      select m.custo_unitario as custo into v_ant
+        from public.estoque_movimentos m
+       where m.produto_id = v_it.produto_id and m.tipo_estoque = 'fisico' and m.tipo_mov = 'entrada'
+         and coalesce(m.origem_id, '00000000-0000-0000-0000-000000000000'::uuid) <> v_nota.id
+         and m.created_at < v_nota.created_at and m.custo_unitario is not null
+       order by m.created_at desc
+       limit 1;
+      if found then
+        update public.produtos set custo = v_ant.custo where id = v_it.produto_id;
+        v_n_custos := v_n_custos + 1;
+      end if;
+    end if;
+  end loop;
+
+  -- 3) vínculo código do fornecedor -> produto (e fracionamento): volta ao da nota anterior, ou some
+  for v_it in
+    select distinct on (codigo_fornecedor) *
+      from public.notas_entrada_itens
+     where nota_id = v_nota.id and coalesce(codigo_fornecedor, '') <> ''
+     order by codigo_fornecedor, item
+  loop
+    select i.produto_id, i.fator, i.custo_unitario into v_ant
+      from public.notas_entrada_itens i
+      join public.notas_entrada n on n.id = i.nota_id
+     where n.codigo_loja = v_loja and n.fornecedor_id = v_nota.fornecedor_id and n.id <> v_nota.id
+       and n.status = 'lancada' and i.codigo_fornecedor = v_it.codigo_fornecedor
+     order by n.created_at desc
+     limit 1;
+    if found then
+      update public.produto_fornecedor
+         set produto_id = v_ant.produto_id, fator = v_ant.fator, ultimo_custo = v_ant.custo_unitario
+       where codigo_loja = v_loja and fornecedor_id = v_nota.fornecedor_id and codigo_fornecedor = v_it.codigo_fornecedor;
+    else
+      delete from public.produto_fornecedor
+       where codigo_loja = v_loja and fornecedor_id = v_nota.fornecedor_id and codigo_fornecedor = v_it.codigo_fornecedor;
+    end if;
+  end loop;
+
+  -- 4) contas a pagar geradas pela nota
+  delete from public.contas_pagar where origem = 'nota_entrada' and origem_id = v_nota.id;
+  get diagnostics v_n_contas = row_count;
+
+  -- 5) a nota (os itens saem junto)
+  create temp table if not exists _excl_prod (produto_id uuid) on commit drop;
+  delete from _excl_prod;
+  insert into _excl_prod select distinct produto_id from public.notas_entrada_itens
+   where nota_id = v_nota.id and coalesce(produto_novo, false);
+  delete from public.notas_entrada where id = v_nota.id;
+
+  -- 6) produtos cadastrados pela nota: exclui se ainda não foram vendidos nem usados em outra nota
+  for v_it in select produto_id from _excl_prod loop
+    if exists (select 1 from public.venda_itens where produto_id = v_it.produto_id)
+       or exists (select 1 from public.notas_entrada_itens where produto_id = v_it.produto_id)
+       or exists (select 1 from public.estoque_movimentos where produto_id = v_it.produto_id
+                     and coalesce(origem, '') not in ('nota_entrada', 'nota_entrada_exclusao')) then
+      update public.produtos set ativo = false where id = v_it.produto_id;
+      v_n_prod_mantidos := v_n_prod_mantidos + 1;
+    else
+      delete from public.produtos where id = v_it.produto_id;
+      v_n_prod_del := v_n_prod_del + 1;
+    end if;
+  end loop;
+
+  -- 7) fornecedor cadastrado pela nota: exclui se não tiver mais nada ligado a ele
+  if v_forn.id is not null and coalesce(v_forn.origem, '') = 'xml'
+     and v_forn.created_at >= v_nota.created_at - interval '5 minutes'
+     and not exists (select 1 from public.notas_entrada where fornecedor_id = v_forn.id)
+     and not exists (select 1 from public.contas_pagar where fornecedor_id = v_forn.id) then
+    delete from public.fornecedores where id = v_forn.id;
+    v_forn_del := true;
+  end if;
+
+  select count(*) into v_negativos
+    from public.estoque_saldos s
+   where s.codigo_loja = v_loja and s.tipo = 'fisico' and s.saldo < 0
+     and s.produto_id in (select (x->>'produto_id')::uuid from jsonb_array_elements(v_itens) x);
+
+  return jsonb_build_object(
+    'itens_estornados', v_n_mov,
+    'custos_restaurados', v_n_custos,
+    'produtos_excluidos', v_n_prod_del,
+    'produtos_inativados', v_n_prod_mantidos,
+    'contas_excluidas', v_n_contas,
+    'fornecedor_excluido', v_forn_del,
+    'estoques_negativos', v_negativos
+  );
+end
+$function$;
+
+revoke all on function public.excluir_nota_entrada(uuid, text, text) from public, anon;
+grant execute on function public.excluir_nota_entrada(uuid, text, text) to authenticated;
+
+-- o app enxerga a função nova na hora
+notify pgrst, 'reload schema';
