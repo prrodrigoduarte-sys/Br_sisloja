@@ -56,6 +56,7 @@ const ACOES: Record<string, { rotulo: string; cor: string }> = {
 export const PERFIS: { id: string; rotulo: string; pode: string }[] = [
   { id: 'admin', rotulo: 'Administrador', pode: 'tudo, inclusive Configurações e registro de atividades' },
   { id: 'gerente', rotulo: 'Gerente', pode: 'PDV, produtos, preços, notas, financeiro e relatórios' },
+  { id: 'colaborador', rotulo: 'Colaborador', pode: 'tudo, menos o que exige a senha do administrador (Configurações e exclusão de nota)' },
   { id: 'financeiro', rotulo: 'Financeiro', pode: 'financeiro, fornecedores e relatórios' },
   { id: 'estoquista', rotulo: 'Estoquista', pode: 'produtos, estoque, notas de entrada e fornecedores' },
   { id: 'caixa', rotulo: 'Caixa', pode: 'PDV (vendas)' },
