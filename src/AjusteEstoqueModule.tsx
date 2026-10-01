@@ -4,6 +4,7 @@
 // Todo ajuste vai para o relatório "Ajustes de estoque" em Configurações (só administrador).
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
+import { buscarTodos } from './buscarTodos';
 
 type Produto = {
   id: string;
@@ -59,7 +60,9 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
 
   const carregarSaldosEMarcas = async () => {
     const [s, a] = await Promise.all([
-      supabase.from('estoque_saldos').select('produto_id, saldo').eq('codigo_loja', loggedUser.codigo_loja).eq('tipo', 'fisico').limit(30000),
+      buscarTodos(() =>
+        supabase.from('estoque_saldos').select('produto_id, saldo').eq('codigo_loja', loggedUser.codigo_loja).eq('tipo', 'fisico').order('produto_id')
+      ),
       supabase.rpc('ajustes_recentes', { p_desde: inicioDoDia() }),
     ]);
     if (!s.error) {
@@ -80,15 +83,11 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
 
   const carregar = async () => {
     setCarregando(true);
-    const p = await supabase
-      .from('produtos')
-      .select('*')
-      .eq('codigo_loja', loggedUser.codigo_loja)
-      .eq('ativo', true)
-      .order('nome')
-      .limit(10000);
+    const p = await buscarTodos(() =>
+      supabase.from('produtos').select('*').eq('codigo_loja', loggedUser.codigo_loja).eq('ativo', true).order('nome').order('id')
+    );
     if (p.error) setErro('Erro ao carregar: ' + p.error.message);
-    const nf = await supabase.from('notas_entrada_itens').select('produto_id').limit(50000);
+    const nf = await buscarTodos(() => supabase.from('notas_entrada_itens').select('produto_id').order('id'));
     setViaNF(new Set(((nf.data as any[]) || []).map((x) => x.produto_id).filter(Boolean)));
     setProdutos(
       ((p.data as any[]) || [])
