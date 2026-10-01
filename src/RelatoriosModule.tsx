@@ -5,8 +5,11 @@ import { supabase } from './supabase';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 
-type Rel = 'estoque';
-const RELATORIOS: { id: Rel; rotulo: string }[] = [{ id: 'estoque', rotulo: '📦 Estoque valorizado' }];
+type Rel = 'estoque' | 'vendas';
+const RELATORIOS: { id: Rel; rotulo: string }[] = [
+  { id: 'estoque', rotulo: '📦 Estoque valorizado' },
+  { id: 'vendas', rotulo: '🧑‍💼 Vendas por usuário' },
+];
 
 export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }) {
   const [rel, setRel] = useState<Rel>('estoque');
@@ -25,6 +28,7 @@ export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }
         ))}
       </div>
       {rel === 'estoque' && <EstoqueValorizado loggedUser={loggedUser} />}
+      {rel === 'vendas' && <VendasPorUsuario loggedUser={loggedUser} />}
     </div>
   );
 }
@@ -375,6 +379,181 @@ function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
         Custo = custo atual do cadastro (última entrada, com frete, IPI e ST). Lucro bruto potencial = quanto renderia vender todo o estoque pelo preço
         escolhido, sem impostos de venda. Itens marcados como "Não listar no estoque" (não circulantes) ficam fora. Clique no título das colunas para ordenar.
       </p>
+    </div>
+  );
+}
+
+// =====================================================================
+// VENDAS POR USUÁRIO (quem vendeu)
+// =====================================================================
+const FORMAS: Record<string, string> = { dinheiro: 'Dinheiro', pix: 'Pix', cartao_debito: 'Débito', cartao_credito: 'Crédito' };
+
+function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
+  const [de, setDe] = useState(() => new Date().toLocaleDateString('sv-SE').slice(0, 8) + '01');
+  const [ate, setAte] = useState(() => new Date().toLocaleDateString('sv-SE'));
+  const [vendas, setVendas] = useState<any[]>([]);
+  const [nomes, setNomes] = useState<Record<string, string>>({});
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+  const [aberto, setAberto] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      setErro('');
+      const [v, n] = await Promise.all([
+        supabase
+          .from('vendas')
+          .select('id, numero, total, desconto, forma_pagamento, operador, status, created_by, created_at')
+          .eq('codigo_loja', loggedUser.codigo_loja)
+          .gte('created_at', new Date(de + 'T00:00:00').toISOString())
+          .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
+          .order('created_at')
+          .limit(20000),
+        supabase.rpc('nomes_usuarios'),
+      ]);
+      if (v.error) setErro('Erro ao carregar as vendas: ' + v.error.message);
+      setVendas(v.data || []);
+      const m: Record<string, string> = {};
+      ((n.data as any[]) || []).forEach((x) => (m[x.user_id] = x.nome));
+      setNomes(m);
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja, de, ate]);
+
+  const cancelada = (v: any) => String(v.status || '').toLowerCase().startsWith('cancel');
+
+  const grupos = useMemo(() => {
+    const mapa = new Map<string, { chave: string; nome: string; vendas: any[]; canceladas: number }>();
+    for (const v of vendas) {
+      const chave = v.created_by || 'op:' + (v.operador || '—');
+      const nome = (v.created_by && nomes[v.created_by]) || v.operador || 'Sem identificação';
+      if (!mapa.has(chave)) mapa.set(chave, { chave, nome, vendas: [], canceladas: 0 });
+      const g = mapa.get(chave)!;
+      if (cancelada(v)) g.canceladas++;
+      else g.vendas.push(v);
+    }
+    return Array.from(mapa.values())
+      .map((g) => {
+        const total = r2(g.vendas.reduce((s, v) => s + Number(v.total || 0), 0));
+        const desconto = r2(g.vendas.reduce((s, v) => s + Number(v.desconto || 0), 0));
+        const porForma: Record<string, number> = {};
+        g.vendas.forEach((v) => (porForma[v.forma_pagamento || 'outros'] = r2((porForma[v.forma_pagamento || 'outros'] || 0) + Number(v.total || 0))));
+        return { ...g, total, desconto, porForma, ticket: g.vendas.length ? r2(total / g.vendas.length) : 0 };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [vendas, nomes]);
+
+  const geral = useMemo(() => {
+    const total = r2(grupos.reduce((s, g) => s + g.total, 0));
+    const qtd = grupos.reduce((s, g) => s + g.vendas.length, 0);
+    return { total, qtd, ticket: qtd ? r2(total / qtd) : 0, canceladas: grupos.reduce((s, g) => s + g.canceladas, 0) };
+  }, [grupos]);
+
+  const formas = Array.from(new Set(grupos.flatMap((g) => Object.keys(g.porForma))));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm print:hidden">
+        de <input type="date" value={de} onChange={(e) => setDe(e.target.value)} className="rounded border px-2 py-1" />
+        até <input type="date" value={ate} onChange={(e) => setAte(e.target.value)} className="rounded border px-2 py-1" />
+        <div className="flex-1" />
+        <button onClick={() => window.print()} className="rounded-lg border px-3 py-1 hover:bg-gray-50">
+          🖨 Imprimir
+        </button>
+      </div>
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      <div className="rounded-xl bg-white p-4 shadow-sm">
+        <h3 className="text-lg font-bold text-gray-800">Vendas por usuário</h3>
+        <p className="mb-3 text-xs text-gray-500">
+          {loggedUser.loja_nome} · {de.split('-').reverse().join('/')} a {ate.split('-').reverse().join('/')}
+        </p>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <Quadro titulo="Vendas" valor={String(geral.qtd)} />
+          <Quadro titulo="Total vendido" valor={brl(geral.total)} destaque="text-blue-800" />
+          <Quadro titulo="Ticket médio" valor={brl(geral.ticket)} />
+          <Quadro titulo="Canceladas" valor={String(geral.canceladas)} destaque={geral.canceladas ? 'text-red-700' : undefined} />
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+        {carregando ? (
+          <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>
+        ) : !grupos.length ? (
+          <p className="p-6 text-center text-sm text-gray-500">Nenhuma venda no período.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b bg-gray-50 text-left text-[11px] uppercase text-gray-600">
+              <tr>
+                <th className="p-2">Usuário</th>
+                <th className="p-2 text-right">Vendas</th>
+                <th className="p-2 text-right">Total</th>
+                <th className="p-2 text-right">Ticket médio</th>
+                <th className="p-2 text-right">Descontos</th>
+                {formas.map((f) => (
+                  <th key={f} className="p-2 text-right">
+                    {FORMAS[f] || f}
+                  </th>
+                ))}
+                <th className="p-2 text-right">Canceladas</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {grupos.map((g) => (
+                <React.Fragment key={g.chave}>
+                  <tr onClick={() => setAberto(aberto === g.chave ? null : g.chave)} className="cursor-pointer hover:bg-gray-50">
+                    <td className="p-2 font-medium text-gray-800">
+                      {aberto === g.chave ? '▾' : '▸'} {g.nome}
+                    </td>
+                    <td className="p-2 text-right">{g.vendas.length}</td>
+                    <td className="p-2 text-right font-semibold text-blue-800">{brl(g.total)}</td>
+                    <td className="p-2 text-right">{brl(g.ticket)}</td>
+                    <td className="p-2 text-right text-gray-600">{brl(g.desconto)}</td>
+                    {formas.map((f) => (
+                      <td key={f} className="p-2 text-right text-gray-600">
+                        {g.porForma[f] ? brl(g.porForma[f]) : '—'}
+                      </td>
+                    ))}
+                    <td className={`p-2 text-right ${g.canceladas ? 'font-bold text-red-600' : 'text-gray-400'}`}>{g.canceladas}</td>
+                  </tr>
+                  {aberto === g.chave &&
+                    g.vendas.map((v) => (
+                      <tr key={v.id} className="bg-gray-50 text-xs text-gray-600">
+                        <td className="p-1 pl-8">
+                          Venda nº {v.numero} · {new Date(v.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                        </td>
+                        <td />
+                        <td className="p-1 text-right">{brl(Number(v.total))}</td>
+                        <td />
+                        <td className="p-1 text-right">{Number(v.desconto) ? brl(Number(v.desconto)) : ''}</td>
+                        <td colSpan={formas.length + 1} className="p-1">
+                          {FORMAS[v.forma_pagamento] || v.forma_pagamento}
+                        </td>
+                      </tr>
+                    ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+            <tfoot className="border-t-2 bg-gray-100 font-bold">
+              <tr>
+                <td className="p-2 text-right">TOTAL</td>
+                <td className="p-2 text-right">{geral.qtd}</td>
+                <td className="p-2 text-right text-blue-800">{brl(geral.total)}</td>
+                <td className="p-2 text-right">{brl(geral.ticket)}</td>
+                <td className="p-2 text-right">{brl(r2(grupos.reduce((s, g) => s + g.desconto, 0)))}</td>
+                {formas.map((f) => (
+                  <td key={f} className="p-2 text-right">
+                    {brl(r2(grupos.reduce((s, g) => s + (g.porForma[f] || 0), 0)))}
+                  </td>
+                ))}
+                <td className="p-2 text-right">{geral.canceladas}</td>
+              </tr>
+            </tfoot>
+          </table>
+        )}
+      </div>
+      <p className="text-[11px] text-gray-400 print:hidden">Clique no nome do usuário para ver as vendas dele. Vendas canceladas não entram nos totais.</p>
     </div>
   );
 }
