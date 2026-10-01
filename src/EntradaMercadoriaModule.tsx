@@ -134,6 +134,9 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
   const [aberta, setAberta] = useState<string | null>(null);
   const [itens, setItens] = useState<any[]>([]);
   const [erro, setErro] = useState('');
+  const [excluir, setExcluir] = useState<any | null>(null);
+  const [aviso, setAviso] = useState('');
+  const [versao, setVersao] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -148,7 +151,7 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
       setNotas(data || []);
       setCarregando(false);
     })();
-  }, [usuario.codigo_loja]);
+  }, [usuario.codigo_loja, versao]);
 
   const abrir = async (id: string) => {
     if (aberta === id) return setAberta(null);
@@ -169,6 +172,24 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
 
   return (
     <div className="space-y-2">
+      {aviso && (
+        <p className="flex items-center rounded-lg bg-green-50 p-3 text-sm text-green-800">
+          <span className="flex-1">{aviso}</span>
+          <button onClick={() => setAviso('')}>✕</button>
+        </p>
+      )}
+      {excluir && (
+        <ExcluirNota
+          nota={excluir}
+          aoFechar={() => setExcluir(null)}
+          aoExcluir={(msg) => {
+            setExcluir(null);
+            setAberta(null);
+            setAviso(msg);
+            setVersao((v) => v + 1);
+          }}
+        />
+      )}
       {notas.map((n) => (
         <div key={n.id} className="overflow-hidden rounded-xl bg-white shadow-sm">
           <button onClick={() => abrir(n.id)} className="flex w-full flex-wrap items-center gap-x-4 gap-y-1 p-3 text-left hover:bg-gray-50">
@@ -185,7 +206,15 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
           </button>
           {aberta === n.id && (
             <div className="overflow-x-auto border-t bg-gray-50 p-3">
-              <p className="mb-2 font-mono text-[11px] text-gray-500">Chave: {n.chave_acesso}</p>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <p className="flex-1 font-mono text-[11px] text-gray-500">Chave: {n.chave_acesso}</p>
+                <button
+                  onClick={() => setExcluir(n)}
+                  className="rounded border border-red-300 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                >
+                  🗑 Excluir nota
+                </button>
+              </div>
               <table className="w-full text-xs">
                 <thead className="text-left text-gray-500">
                   <tr>
@@ -217,6 +246,81 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// =====================================================================
+// EXCLUIR NOTA DE ENTRADA (senha do administrador) — desfaz todos os efeitos
+// e fica gravado no Registro de atividades (Configurações).
+// =====================================================================
+function ExcluirNota({ nota, aoFechar, aoExcluir }: { nota: any; aoFechar: () => void; aoExcluir: (msg: string) => void }) {
+  const [motivo, setMotivo] = useState('');
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState('');
+  const [excluindo, setExcluindo] = useState(false);
+
+  const confirmar = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (motivo.trim().length < 5) return setErro('Escreva o motivo da exclusão (fica no registro de atividades).');
+    if (!senha) return setErro('Digite a senha de um administrador.');
+    setExcluindo(true);
+    setErro('');
+    const { data, error } = await supabase.rpc('excluir_nota_entrada', { p_nota_id: nota.id, p_senha: senha, p_motivo: motivo.trim() });
+    setExcluindo(false);
+    setSenha('');
+    if (error) return setErro(error.message);
+    const r: any = data || {};
+    aoExcluir(
+      `NF ${nota.numero} excluída. ` +
+        [
+          r.itens_estornados != null && `${r.itens_estornados} item(ns) tirados do estoque`,
+          r.produtos_excluidos > 0 && `${r.produtos_excluidos} produto(s) novo(s) excluído(s)`,
+          r.custos_restaurados > 0 && `${r.custos_restaurados} custo(s)/preço(s) voltaram ao anterior`,
+          r.contas_excluidas > 0 && `${r.contas_excluidas} conta(s) a pagar excluída(s)`,
+          r.fornecedor_excluido && 'fornecedor cadastrado pela nota excluído',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-8" onMouseDown={aoFechar}>
+      <form onSubmit={confirmar} className="w-full max-w-md space-y-3 rounded-xl bg-white p-5 text-sm shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-red-700">🗑 Excluir NF {nota.numero}</h3>
+        <p className="text-gray-700">
+          {nota.fornecedores?.nome_fantasia || nota.fornecedores?.nome} · {brl(nota.valor_total)}
+        </p>
+        <div className="rounded-lg bg-red-50 p-3 text-red-800">
+          <p className="font-semibold">Tudo o que esta nota fez será desfeito:</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">
+            <li>as quantidades saem do estoque;</li>
+            <li>custo e preços de venda voltam ao que eram antes da nota;</li>
+            <li>produtos cadastrados por ela são excluídos (se ainda não foram vendidos);</li>
+            <li>as contas a pagar geradas por ela são excluídas (contas já pagas impedem a exclusão);</li>
+            <li>o fornecedor cadastrado por ela é excluído, se não tiver outras notas.</li>
+          </ul>
+          <p className="mt-2 text-xs">Fica registrado em Configurações → Registro de atividades.</p>
+        </div>
+        <label className="block">
+          <span className="text-gray-600">Motivo</span>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Ex.: nota lançada em duplicidade" />
+        </label>
+        <label className="block">
+          <span className="text-gray-600">Senha do administrador</span>
+          <input type="password" autoComplete="off" value={senha} onChange={(e) => setSenha(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" />
+        </label>
+        {erro && <p className="rounded-lg bg-red-50 p-3 text-red-700">{erro}</p>}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={aoFechar} className="rounded-lg px-4 py-2 text-gray-600 hover:bg-gray-100">
+            Voltar
+          </button>
+          <button type="submit" disabled={excluindo} className="rounded-lg bg-red-600 px-4 py-2 font-semibold text-white hover:bg-red-700 disabled:opacity-50">
+            {excluindo ? 'Excluindo…' : 'Excluir nota'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -909,7 +1013,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
               </div>
 
               {/* fracionamento: sugestão na frente do produto; vazio = entra como veio na nota */}
-              <Fracionar it={it} custo={custo} aoMudar={(m) => alterar(idx, m, 'manter')} />
+              <Fracionar key={nfe.chave + idx} it={it}custo={custo} aoMudar={(m) => alterar(idx, m, 'manter')} />
 
               {/* preços */}
               <div className="mt-2 flex flex-wrap items-end gap-3">
