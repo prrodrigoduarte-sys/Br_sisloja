@@ -4,8 +4,9 @@ import PdvModule from './PdvModule';
 import ProdutosEstoqueModule from './ProdutosEstoqueModule';
 import FornecedoresModule from './FornecedoresModule';
 import EntradaMercadoriaModule from './EntradaMercadoriaModule';
+import FinanceiroModule from './FinanceiroModule';
 
-type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores';
+type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro';
 
 type Usuario = {
   id: string;
@@ -21,9 +22,15 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'produtos', rotulo: 'Produtos & Estoque', icone: '📦' },
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
   { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
+  { id: 'financeiro', rotulo: 'Financeiro', icone: '💰' },
 ];
 
-const EM_BREVE = ['Contas a Pagar', 'Contas a Receber', 'Nota Fiscal', 'Financeiro'];
+// abas que só alguns perfis enxergam
+const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
+  financeiro: ['admin', 'gerente', 'financeiro'],
+};
+
+const EM_BREVE = ['Nota Fiscal'];
 
 export default function App() {
   const [carregando, setCarregando] = useState(true);
@@ -157,7 +164,7 @@ export default function App() {
           </button>
         </div>
         <nav className="px-4 flex flex-wrap gap-1 items-center">
-          {ABAS.map((a) => (
+          {ABAS.filter((a) => !PERFIS_ABA[a.id] || PERFIS_ABA[a.id]!.includes(usuario.perfil.toLowerCase())).map((a) => (
             <button
               key={a.id}
               onClick={() => setAba(a.id)}
@@ -180,6 +187,7 @@ export default function App() {
         {aba === 'produtos' && <ProdutosEstoqueModule loggedUser={usuario} />}
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
         {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
+        {aba === 'financeiro' && <FinanceiroModule loggedUser={usuario} />}
       </main>
     </div>
   );
