@@ -84,7 +84,7 @@ function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
     (async () => {
       setCarregando(true);
       const [p, s, t, pp] = await Promise.all([
-        supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo').eq('codigo_loja', loggedUser.codigo_loja).limit(10000),
+        supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo, nao_listar_estoque').eq('codigo_loja', loggedUser.codigo_loja).limit(10000),
         supabase.from('estoque_saldos').select('produto_id, tipo, saldo').eq('codigo_loja', loggedUser.codigo_loja).limit(30000),
         supabase.from('tabelas_preco').select('id, nome').order('nome'),
         supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
@@ -102,11 +102,12 @@ function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
     })();
   }, [loggedUser.codigo_loja]);
 
-  const grupos = useMemo(() => Array.from(new Set(produtos.map((p) => p.grupo || '').filter(Boolean))).sort(), [produtos]);
+  const grupos = useMemo(() => Array.from(new Set(produtos.filter((p) => !p.nao_listar_estoque).map((p) => p.grupo || '').filter(Boolean))).sort(), [produtos]);
 
   const linhas: Linha[] = useMemo(() => {
     const q = busca.trim().toLowerCase();
     const lista = produtos
+      .filter((p) => !p.nao_listar_estoque) // item não circulante: fora da lista e dos cálculos
       .filter((p) => inativos || p.ativo)
       .filter((p) => !grupo || (p.grupo || '') === grupo)
       .filter((p) => !q || p.nome.toLowerCase().includes(q) || String(p.sku).toLowerCase().includes(q) || (p.codigo_barras || '').includes(q))
@@ -372,7 +373,7 @@ function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
       </div>
       <p className="text-[11px] text-gray-400 print:hidden">
         Custo = custo atual do cadastro (última entrada, com frete, IPI e ST). Lucro bruto potencial = quanto renderia vender todo o estoque pelo preço
-        escolhido, sem impostos de venda. Clique no título das colunas para ordenar.
+        escolhido, sem impostos de venda. Itens marcados como "Não listar no estoque" (não circulantes) ficam fora. Clique no título das colunas para ordenar.
       </p>
     </div>
   );
