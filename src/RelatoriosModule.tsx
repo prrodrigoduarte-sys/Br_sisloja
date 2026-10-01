@@ -2,6 +2,7 @@
 // Estoque valorizado: quantidade × preço de custo e quantidade × preço de venda, por produto, com totais.
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
+import { buscarTodos } from './buscarTodos';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 
@@ -88,10 +89,16 @@ function EstoqueValorizado({ loggedUser }: { loggedUser: Usuario }) {
     (async () => {
       setCarregando(true);
       const [p, s, t, pp] = await Promise.all([
-        supabase.from('produtos').select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo, nao_listar_estoque').eq('codigo_loja', loggedUser.codigo_loja).limit(10000),
-        supabase.from('estoque_saldos').select('produto_id, tipo, saldo').eq('codigo_loja', loggedUser.codigo_loja).limit(30000),
+        buscarTodos(() =>
+          supabase
+            .from('produtos')
+            .select('id, sku, codigo_barras, nome, unidade, grupo, custo, preco_venda, ativo, nao_listar_estoque')
+            .eq('codigo_loja', loggedUser.codigo_loja)
+            .order('id')
+        ),
+        buscarTodos(() => supabase.from('estoque_saldos').select('produto_id, tipo, saldo').eq('codigo_loja', loggedUser.codigo_loja).order('produto_id').order('tipo')),
         supabase.from('tabelas_preco').select('id, nome').order('nome'),
-        supabase.from('precos_produto').select('tabela_id, produto_id, preco').limit(50000),
+        buscarTodos(() => supabase.from('precos_produto').select('tabela_id, produto_id, preco').order('produto_id').order('tabela_id')),
       ]);
       if (p.error || s.error) setErro('Erro ao carregar: ' + (p.error || s.error)!.message);
       setProdutos(p.data || []);
@@ -402,14 +409,16 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
       setCarregando(true);
       setErro('');
       const [v, n] = await Promise.all([
-        supabase
-          .from('vendas')
-          .select('id, numero, total, desconto, forma_pagamento, operador, status, created_by, created_at')
-          .eq('codigo_loja', loggedUser.codigo_loja)
-          .gte('created_at', new Date(de + 'T00:00:00').toISOString())
-          .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
-          .order('created_at')
-          .limit(20000),
+        buscarTodos(() =>
+          supabase
+            .from('vendas')
+            .select('id, numero, total, desconto, forma_pagamento, operador, status, created_by, created_at')
+            .eq('codigo_loja', loggedUser.codigo_loja)
+            .gte('created_at', new Date(de + 'T00:00:00').toISOString())
+            .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
+            .order('created_at')
+            .order('id')
+        ),
         supabase.rpc('nomes_usuarios'),
       ]);
       if (v.error) setErro('Erro ao carregar as vendas: ' + v.error.message);
