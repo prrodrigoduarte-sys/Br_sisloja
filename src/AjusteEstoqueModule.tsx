@@ -13,6 +13,7 @@ type Produto = {
   unidade: string;
   custo: number;
   preco_venda: number;
+  conferir: string | null; // sugestão de conferência (ex.: veio negativo do sistema antigo)
 };
 
 type Marca = { usuario: string; quando: string; antes: number; depois: number };
@@ -51,6 +52,8 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
   const [modo, setModo] = useState<'contagem' | 'ajuste'>('contagem');
   const [motivo, setMotivo] = useState(MOTIVOS[0]);
   const [esconderAjustados, setEsconderAjustados] = useState(false);
+  const [soConferir, setSoConferir] = useState(false);
+  const [viaNF, setViaNF] = useState<Set<string>>(new Set()); // produtos que entraram por nota fiscal (XML)
   const [limite, setLimite] = useState(POR_PAGINA);
   const buscaRef = useRef<HTMLInputElement>(null);
 
@@ -79,16 +82,18 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
     setCarregando(true);
     const p = await supabase
       .from('produtos')
-      .select('id, sku, codigo_barras, nome, unidade, custo, preco_venda, nao_listar_estoque')
+      .select('*')
       .eq('codigo_loja', loggedUser.codigo_loja)
       .eq('ativo', true)
       .order('nome')
       .limit(10000);
     if (p.error) setErro('Erro ao carregar: ' + p.error.message);
+    const nf = await supabase.from('notas_entrada_itens').select('produto_id').limit(50000);
+    setViaNF(new Set(((nf.data as any[]) || []).map((x) => x.produto_id).filter(Boolean)));
     setProdutos(
       ((p.data as any[]) || [])
         .filter((x) => !x.nao_listar_estoque)
-        .map((x) => ({ ...x, custo: Number(x.custo) || 0, preco_venda: Number(x.preco_venda) || 0 }))
+        .map((x) => ({ ...x, custo: Number(x.custo) || 0, preco_venda: Number(x.preco_venda) || 0, conferir: x.conferir || null }))
     );
     await carregarSaldosEMarcas();
     setCarregando(false);
@@ -106,6 +111,7 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
     const q = busca.trim().toLowerCase();
     let lista = produtos;
     if (esconderAjustados) lista = lista.filter((p) => !marcas[p.id]);
+    if (soConferir) lista = lista.filter((p) => p.conferir);
     if (!q) return lista;
     // código de barras / código exato vem primeiro (leitor de código de barras)
     const exato = lista.filter((p) => p.codigo_barras === busca.trim() || p.sku.toLowerCase() === q);
@@ -113,12 +119,15 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
       (p) => !exato.includes(p) && (p.nome.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.codigo_barras || '').includes(q))
     );
     return [...exato, ...resto];
-  }, [produtos, busca, esconderAjustados, marcas]);
+  }, [produtos, busca, esconderAjustados, soConferir, marcas]);
 
   const totalAjustados = useMemo(() => produtos.filter((p) => marcas[p.id]).length, [produtos, marcas]);
+  const totalConferir = useMemo(() => produtos.filter((p) => p.conferir).length, [produtos]);
 
   const aoGravar = (p: Produto, r: Resultado) => {
     setSaldos((s) => ({ ...s, [p.id]: Number(r.saldo_novo) }));
+    // contou/ajustou: a sugestão de conferência some (o banco também limpa)
+    if (p.conferir) setProdutos((l) => l.map((x) => (x.id === p.id ? { ...x, conferir: null } : x)));
     setMarcas((m) => ({
       ...m,
       [p.id]: { usuario: loggedUser?.nome || 'você', quando: new Date().toISOString(), antes: Number(r.saldo_anterior), depois: Number(r.saldo_novo) },
@@ -188,6 +197,12 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
             <input type="checkbox" checked={esconderAjustados} onChange={(e) => setEsconderAjustados(e.target.checked)} className="w-4 h-4" />
             esconder os já ajustados hoje
           </label>
+          {totalConferir > 0 && (
+            <label className="flex items-center gap-2 text-xs font-bold text-amber-800">
+              <input type="checkbox" checked={soConferir} onChange={(e) => setSoConferir(e.target.checked)} className="w-4 h-4" />
+              ⚠ só os sugeridos para conferir ({totalConferir})
+            </label>
+          )}
         </div>
 
         <input
@@ -225,6 +240,7 @@ export default function AjusteEstoqueModule({ loggedUser, aoVoltar }: { loggedUs
             p={p}
             saldo={saldos[p.id] || 0}
             marca={marcas[p.id]}
+            viaNF={viaNF.has(p.id)}
             modo={modo}
             motivo={motivo}
             aoGravar={(r) => aoGravar(p, r)}
@@ -249,6 +265,7 @@ function LinhaAjuste({
   p,
   saldo,
   marca,
+  viaNF,
   modo,
   motivo,
   aoGravar,
@@ -256,6 +273,7 @@ function LinhaAjuste({
   p: Produto;
   saldo: number;
   marca?: Marca;
+  viaNF?: boolean;
   modo: 'contagem' | 'ajuste';
   motivo: string;
   aoGravar: (r: Resultado) => void;
@@ -296,7 +314,7 @@ function LinhaAjuste({
   };
 
   return (
-    <div className={marca ? 'bg-orange-50' : ''}>
+    <div className={`${marca ? 'bg-orange-50' : viaNF ? 'bg-violet-50' : ''} ${viaNF ? 'border-l-4 border-l-violet-500' : ''}`}>
       {/* faixa laranja: já ajustado hoje */}
       {marca && (
         <div className="bg-orange-500 px-3 sm:px-4 py-1 text-[11px] font-bold text-white">
@@ -305,12 +323,16 @@ function LinhaAjuste({
       )}
       <div className="px-3 sm:px-4 py-2 grid grid-cols-[1fr_auto] sm:grid-cols-[1fr_110px_110px_210px] gap-x-2 gap-y-1 items-center">
         <div className="min-w-0">
-          <p className="font-bold text-sm text-slate-800 leading-tight">{p.nome}</p>
+          <p className="font-bold text-sm text-slate-800 leading-tight">
+            {p.nome}
+            {viaNF && <span className="ml-1.5 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">📄 via NF</span>}
+          </p>
           <p className="text-[11px] text-slate-500">
             Cód. {p.sku}
             {p.codigo_barras && p.codigo_barras !== p.sku ? ` · ${p.codigo_barras}` : ''}
             <span className="sm:hidden"> · {moeda(p.preco_venda)}</span>
           </p>
+          {p.conferir && <p className="mt-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-900">⚠ Conferir: {p.conferir}</p>}
         </div>
         <span className="hidden sm:block text-right text-sm text-slate-600">{moeda(p.preco_venda)}</span>
         <span className={`text-right text-base font-black ${saldo < 0 ? 'text-rose-600' : 'text-slate-800'}`}>
