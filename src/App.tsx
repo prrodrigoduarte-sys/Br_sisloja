@@ -31,6 +31,9 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
 
 // abas que só alguns perfis enxergam
 const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
+  produtos: ['admin', 'gerente', 'estoquista', 'financeiro'],
+  entrada: ['admin', 'gerente', 'estoquista'],
+  fornecedores: ['admin', 'gerente', 'estoquista', 'financeiro'],
   financeiro: ['admin', 'gerente', 'financeiro'],
   relatorios: ['admin', 'gerente', 'financeiro'],
   configuracoes: ['admin'],
