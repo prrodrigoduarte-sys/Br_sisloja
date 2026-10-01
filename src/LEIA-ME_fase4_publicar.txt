@@ -1,0 +1,82 @@
+BR SISLOJA — FASE 4: USUÁRIOS + PUBLICAÇÃO
+==========================================
+
+PARTE A — INSTALAR A FASE 4 (usuários e registro com senha)
+------------------------------------------------------------
+A1. Supabase > SQL Editor > + New query > cole TODO o fase4_usuarios.sql > Run
+    (se aparecer "Potential issue detected", clique em Run query). Deve dar "Success".
+A2. StackBlitz (pasta src), substituir o conteúdo inteiro de:
+      ConfiguracoesModule.tsx   (senha do adm no registro + tela de Usuários)
+      RelatoriosModule.tsx      (novo relatório: Vendas por usuário)
+      App.tsx                   (o que cada perfil enxerga)
+    Lembre: o nome do arquivo NÃO leva ".txt".
+A3. Teste: Configurações > Registro de atividades > digite a sua senha > deve abrir.
+           Configurações > Usuários > você aparece como Administrador.
+
+PERFIS
+  Administrador : tudo (Configurações e registro de atividades)
+  Gerente       : PDV, produtos, preços, notas, financeiro, relatórios
+  Financeiro    : PDV, produtos (consulta), fornecedores, financeiro, relatórios
+  Estoquista    : PDV, produtos, estoque, notas de entrada, fornecedores
+  Caixa         : só o PDV
+
+CADASTRAR FUNCIONÁRIO
+  1. Supabase > Authentication > Users > Add user > Create new user
+     e-mail + senha, marque "Auto Confirm User" > Create.
+  2. No sistema: Configurações > Usuários > Atualizar > nome + perfil > Liberar acesso.
+  Cada um entra com o próprio e-mail. Não compartilhem senha: é assim que o sistema sabe quem vendeu.
+  Para tirar o acesso: desmarque "acesso liberado" e salve (o histórico continua).
+
+
+PARTE B — PUBLICAR (deixar o sistema no ar, com endereço na internet)
+----------------------------------------------------------------------
+B1. LIMPEZA NO STACKBLITZ
+    - Apague os arquivos de apoio que terminam em .txt dentro de src
+      (App.tsx.txt, boleto.ts.txt, embalagem.ts.txt, ...txt) e o boleto.tsx que sobrou.
+    - Abra o sistema no preview e confira: sem tela de erro preta, login funciona, PDV vende.
+
+B2. SALVAR NO GITHUB
+    O seu StackBlitz está ligado ao GitHub (prrodrigoduarte-sys/Br_sisloja).
+    - No StackBlitz, clique no ícone de controle de versão (barra da esquerda) ou no botão "Commit".
+    - Escreva uma mensagem (ex.: "Fase 4 - usuários e relatórios") > Commit / Push para a branch main.
+    - Confira em github.com/prrodrigoduarte-sys/Br_sisloja que os arquivos novos estão lá.
+    RECOMENDADO: deixe o repositório PRIVADO
+      GitHub > repositório > Settings > (fim da página) Danger Zone > Change visibility > Private.
+
+B3. PUBLICAR NA VERCEL (grátis)
+    - vercel.com > Sign Up > Continue with GitHub.
+    - Add New... > Project > escolha Br_sisloja > Import.
+    - Framework: Vite (ele detecta sozinho). Build Command: npm run build. Output: dist.
+    - Deploy. Em 1 ou 2 minutos sai um endereço tipo https://br-sisloja.vercel.app
+    - Se o build falhar com erro do "tsc": no package.json troque
+          "build": "tsc && vite build"   por   "build": "vite build"
+      faça commit de novo; a Vercel publica sozinha.
+
+B4. AJUSTAR O SUPABASE PARA O ENDEREÇO NOVO
+    - Authentication > URL Configuration > Site URL = o endereço da Vercel. Save.
+      (Redirect URLs: adicione o mesmo endereço com /** no final.)
+    - Authentication > Sign In / Providers > Email > DESLIGUE "Allow new users to sign up".
+      Assim só quem você cadastrar consegue criar login.
+
+B5. CONFERÊNCIA DE SEGURANÇA (SQL Editor, só leitura)
+      select c.relname as tabela_sem_protecao
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
+    Tem que voltar VAZIO. Se aparecer alguma tabela, me mande o nome antes de usar na loja.
+
+B6. TESTE FINAL NO ENDEREÇO NOVO (de preferência no celular também)
+    - Login do administrador e de um caixa (o caixa só vê o PDV).
+    - Uma venda de teste em cada forma de pagamento > Relatórios > Vendas por usuário.
+    - Câmera do PDV (só funciona em https, a Vercel já é https).
+    - Entrada de uma nota XML pequena > conferir estoque e Contas a Pagar.
+
+B7. DAQUI PRA FRENTE
+    Mudou algo no StackBlitz > Commit/Push > a Vercel publica sozinha em ~1 minuto.
+
+
+ATENÇÃO — PLANO GRÁTIS DO SUPABASE
+  - Projeto gratuito é PAUSADO se ficar 7 dias sem uso. Com a loja usando todo dia, não pausa.
+  - Não tem backup automático com restauração. Para loja em produção, avalie o plano Pro (US$ 25/mês):
+    backup diário, sem pausa e limites maiores.
+  - Você estourou o limite de tráfego (Egress) no mês passado; neste mês está em 0,9 de 5 GB.
+    Grande parte veio do StackBlitz recarregando o sistema. Usando pelo endereço da Vercel cai bastante.
