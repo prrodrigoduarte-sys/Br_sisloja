@@ -397,7 +397,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               <th className="p-2 text-right" title="Clique no valor para ver o custo">
                 Custo
               </th>
-              <th className="p-2 text-right" title="Clique no valor para ver o preço padrão">Preço padrão</th>
+              <th className="p-2 text-right">Preço padrão</th>
               {tabelas.map((t) => (
                 <th key={t.id} className="p-2 text-right">
                   {t.nome}
@@ -437,9 +437,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                   <td className="p-2 text-right whitespace-nowrap">
                     <CustoOculto valor={p.custo} />
                   </td>
-                  <td className="p-2 text-right whitespace-nowrap">
-                    <Oculto texto={moeda(p.preco_venda || 0)} mascara="R$ ••••" />
-                  </td>
+                  <td className="p-2 text-right font-bold whitespace-nowrap">{moeda(p.preco_venda)}</td>
                   {tabelas.map((t) => {
                     const v = precosLista[`${t.id}|${p.id}`];
                     return (
