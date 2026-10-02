@@ -57,6 +57,24 @@ export default function NotaFiscalVenda({ vendaId, cancelada = false }: { vendaI
     carregar();
   }, [carregar]);
 
+  // cliente da venda já preenche o destinatário da nota
+  useEffect(() => {
+    (async () => {
+      const { data: v } = await supabase.from('vendas').select('cliente_id').eq('id', vendaId).maybeSingle();
+      if (!v?.cliente_id) return;
+      const { data: c } = await supabase.rpc('obter_cliente', { p_id: v.cliente_id });
+      if (!c) return;
+      const x = c as Record<string, any>;
+      setDest((d) => {
+        const novo = { ...d };
+        (Object.keys(destVazio) as (keyof typeof destVazio)[]).forEach((k) => {
+          if (x[k] != null && !novo[k]) novo[k] = String(x[k]);
+        });
+        return novo;
+      });
+    })();
+  }, [vendaId]);
+
   const valida = notas.find((n) => n.status === 'autorizada' || n.status === 'processando');
 
   const executar = async (corpo: Record<string, unknown>, ok: string) => {
