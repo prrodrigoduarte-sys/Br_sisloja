@@ -8,8 +8,9 @@ import FinanceiroModule from './FinanceiroModule';
 import ConfiguracoesModule from './ConfiguracoesModule';
 import RelatoriosModule from './RelatoriosModule';
 import NotasFiscaisModule from './NotasFiscaisModule';
+import DashboardModule from './DashboardModule';
 
-type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'notas' | 'relatorios' | 'configuracoes';
+type Aba = 'dashboard' | 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'notas' | 'relatorios' | 'configuracoes';
 
 type Usuario = {
   id: string;
@@ -22,6 +23,7 @@ type Usuario = {
 };
 
 const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
+  { id: 'dashboard', rotulo: 'Dashboard', icone: '📈' },
   { id: 'pdv', rotulo: 'PDV', icone: '🛒' },
   { id: 'produtos', rotulo: 'Produtos & Estoque', icone: '📦' },
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
@@ -34,6 +36,7 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
 
 // abas que só alguns perfis enxergam
 const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
+  dashboard: ['admin', 'gerente'],
   produtos: ['admin', 'gerente', 'estoquista', 'financeiro'],
   entrada: ['admin', 'gerente', 'estoquista'],
   fornecedores: ['admin', 'gerente', 'estoquista', 'financeiro'],
@@ -43,7 +46,13 @@ const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
   configuracoes: ['admin'],
 };
 
-const EM_BREVE: string[] = [];
+// módulos que ainda vão chegar (aparecem no menu, desabilitados)
+const EM_BREVE: { rotulo: string; icone: string; dica: string }[] = [
+  { rotulo: 'Produção Industrial', icone: '🏭', dica: 'Em breve: ordens de produção, ficha técnica (insumos) e baixa de matéria-prima no estoque.' },
+  { rotulo: 'Serviços', icone: '🛠️', dica: 'Em breve: ordens de serviço integradas às vendas, com mão de obra e peças no mesmo atendimento.' },
+];
+
+const MARCA = 'Sistema Inteligente de Gestão Empresarial';
 
 export default function App() {
   const [carregando, setCarregando] = useState(true);
@@ -130,7 +139,10 @@ export default function App() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
         <form onSubmit={entrar} className="bg-white rounded-xl shadow-xl p-8 w-full max-w-sm space-y-4">
-          <h1 className="text-2xl font-bold text-center text-slate-800">SisLoja</h1>
+          <div className="text-center">
+            <h1 className="text-2xl font-bold text-slate-800">SisLoja</h1>
+            <p className="text-xs text-slate-500">{MARCA}</p>
+          </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
             <input
@@ -191,13 +203,37 @@ export default function App() {
             </button>
           ))}
           {EM_BREVE.map((r) => (
-            <span key={r} className="px-4 py-2 text-sm text-blue-300 cursor-not-allowed" title="Em breve">
-              {r} (em breve)
+            <span
+              key={r.rotulo}
+              className="px-3 py-2 rounded-t-lg text-sm text-blue-300 cursor-not-allowed flex items-center gap-1.5"
+              title={r.dica}
+              aria-disabled="true"
+            >
+              {r.icone} {r.rotulo}
+              <span className="rounded bg-blue-800 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300">em breve</span>
             </span>
           ))}
         </nav>
       </header>
-      <main className="p-4">
+
+      {/* marca d'água: discreta atrás das telas e em destaque na troca de aba */}
+      <style>{`
+        @keyframes sl-entra { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+        @keyframes sl-marca { 0% { opacity: 0; } 25% { opacity: 1; } 100% { opacity: 0; } }
+        .sl-entra { animation: sl-entra .45s ease-out both; }
+        .sl-marca { animation: sl-marca .9s ease-in-out both; }
+        @media (prefers-reduced-motion: reduce) { .sl-entra, .sl-marca { animation: none; } .sl-marca { display: none; } }
+        @media print { .sl-fundo, .sl-marca { display: none; } }
+      `}</style>
+      <div aria-hidden className="sl-fundo pointer-events-none fixed inset-0 top-24 z-0 flex items-center justify-center overflow-hidden">
+        <MarcaDagua opacidade={0.045} />
+      </div>
+      <div key={'m-' + aba} aria-hidden className="sl-marca pointer-events-none fixed inset-0 top-24 z-40 flex items-center justify-center bg-slate-100/80">
+        <MarcaDagua opacidade={0.35} />
+      </div>
+
+      <main key={aba} className="sl-entra relative z-10 p-4">
+        {aba === 'dashboard' && <DashboardModule loggedUser={usuario} />}
         {aba === 'pdv' && <PdvModule loggedUser={usuario} />}
         {aba === 'produtos' && <ProdutosEstoqueModule loggedUser={usuario} />}
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
@@ -207,6 +243,15 @@ export default function App() {
         {aba === 'relatorios' && <RelatoriosModule loggedUser={usuario} />}
         {aba === 'configuracoes' && <ConfiguracoesModule loggedUser={usuario} />}
       </main>
+    </div>
+  );
+}
+
+function MarcaDagua({ opacidade }: { opacidade: number }) {
+  return (
+    <div className="select-none text-center text-blue-900" style={{ opacity: opacidade, transform: 'rotate(-12deg)' }}>
+      <div className="text-6xl sm:text-8xl font-black tracking-tight">SisLoja</div>
+      <div className="mt-2 text-lg sm:text-3xl font-bold uppercase tracking-[0.2em]">{MARCA}</div>
     </div>
   );
 }
