@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
 import NotaFiscalVenda from './NotaFiscalVenda';
+import { SeletorCliente, type Cliente } from './ClienteVenda';
 
 // ------------------------------------------------------------
 // PDV (frente de caixa) — pensado para celular primeiro.
@@ -33,6 +34,7 @@ interface ItemCarrinho {
 
 interface VendaFeita {
   id?: string;
+  cliente?: string | null;
   numero: number;
   total: number;
   troco: number;
@@ -222,6 +224,7 @@ table.itens{width:100%;border-collapse:collapse;margin-top:6px}
 </table>
 <div class="rodape">
   <table class="pag">
+    ${v.cliente ? `<tr><td><b>Cliente:</b> ${esc(v.cliente)}</td></tr>` : ''}
     <tr><td><b>Pagamento:</b> ${esc(forma)}</td></tr>
     ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido: ${moeda(v.recebido)} · Troco: ${moeda(v.troco)}</td></tr>` : ''}
     <tr><td>Itens: ${v.itens.length}</td></tr>
@@ -256,6 +259,7 @@ small{color:#444}
 <h1>${esc(loja)}</h1>
 <p>Comprovante de venda nº ${v.numero}</p>
 <p>${esc(v.data)}</p>
+${v.cliente ? `<p>Cliente: ${esc(v.cliente)}</p>` : ''}
 <p><small>Documento sem valor fiscal</small></p>
 <table>${linhas}</table>
 <table>
@@ -319,8 +323,10 @@ function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoF
 
   const reimprimir = async (v: any, formato: FormatoRecibo) => {
     const l = await itensDe(v.id);
+    const cli = v.cliente_id ? ((await supabase.rpc('obter_cliente', { p_id: v.cliente_id })).data as any) : null;
     imprimirRecibo(
       {
+        cliente: cli?.nome || null,
         numero: Number(v.numero),
         total: Number(v.total),
         troco: Number(v.troco || 0),
@@ -543,6 +549,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
   const [forma, setForma] = useState('dinheiro');
   const [parcelas, setParcelas] = useState(1); // só no crédito (1 a 10)
+  const [cliente, setCliente] = useState<Cliente | null>(null);
   const [recebido, setRecebido] = useState('');
   const [desconto, setDesconto] = useState('');
 
@@ -736,7 +743,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       p_recebido: forma === 'dinheiro' ? valorRecebido : null,
       p_desconto: valorDesconto,
       p_tabela: tabelaId || null,
-      p_cliente: null,
+      p_cliente: cliente?.id || null,
       p_operador: operador,
       p_parcelas: forma === 'cartao_credito' ? parcelas : 1,
     });
@@ -748,6 +755,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     const r: any = data;
     setVendaFeita({
       id: r.id,
+      cliente: cliente?.nome || null,
       numero: Number(r.numero),
       total: Number(r.total),
       troco: Number(r.troco),
@@ -773,8 +781,9 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setRecebido('');
     setDesconto('');
     setParcelas(1);
+    setCliente(null);
     setCarrinhoAberto(false);
-  }, [salvando, carrinho, forma, parcelas, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
+  }, [salvando, carrinho, forma, parcelas, cliente, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
 
   // atalho F10
   useEffect(() => {
@@ -1005,6 +1014,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
         </div>
 
         <div className="border-t pt-3 flex flex-col gap-2.5">
+          <SeletorCliente cliente={cliente} aoMudar={setCliente} />
           <div className="grid grid-cols-4 gap-1.5">
             {FORMAS.map((f) => (
               <button
