@@ -35,6 +35,7 @@ interface VendaFeita {
   total: number;
   troco: number;
   forma: string;
+  parcelas: number;
   recebido: number | null;
   desconto: number;
   itens: { nome: string; quantidade: number; preco: number; subtotal: number }[];
@@ -159,7 +160,9 @@ function imprimirRecibo(v: VendaFeita, loja: string) {
         `<tr><td>${esc(i.nome)}<br><small>${i.quantidade} x ${moeda(i.preco)}</small></td><td style="text-align:right">${moeda(i.subtotal)}</td></tr>`
     )
     .join('');
-  const forma = FORMAS.find((f) => f.id === v.forma)?.rotulo || v.forma;
+  const forma =
+    (FORMAS.find((f) => f.id === v.forma)?.rotulo || v.forma) +
+    (v.forma === 'cartao_credito' ? (v.parcelas > 1 ? ` ${v.parcelas}x de ${moeda(v.total / v.parcelas)}` : ' à vista') : '');
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Venda ${v.numero}</title>
 <style>
 @page{margin:8mm}
@@ -251,6 +254,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   const [busca, setBusca] = useState('');
   const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
   const [forma, setForma] = useState('dinheiro');
+  const [parcelas, setParcelas] = useState(1); // só no crédito (1 a 10)
   const [recebido, setRecebido] = useState('');
   const [desconto, setDesconto] = useState('');
 
@@ -445,6 +449,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       p_tabela: tabelaId || null,
       p_cliente: null,
       p_operador: operador,
+      p_parcelas: forma === 'cartao_credito' ? parcelas : 1,
     });
     setSalvando(false);
     if (error) {
@@ -457,6 +462,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       total: Number(r.total),
       troco: Number(r.troco),
       forma,
+      parcelas: forma === 'cartao_credito' ? parcelas : 1,
       recebido: forma === 'dinheiro' ? valorRecebido : null,
       desconto: valorDesconto,
       itens: carrinho.map((x) => ({
@@ -476,8 +482,9 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setCarrinho([]);
     setRecebido('');
     setDesconto('');
+    setParcelas(1);
     setCarrinhoAberto(false);
-  }, [salvando, carrinho, forma, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
+  }, [salvando, carrinho, forma, parcelas, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
 
   // atalho F10
   useEffect(() => {
@@ -716,6 +723,23 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
             ))}
           </div>
 
+          {forma === 'cartao_credito' && (
+            <label className="text-[11px] font-bold text-slate-500">
+              PARCELAS
+              <select
+                value={parcelas}
+                onChange={(e) => setParcelas(Number(e.target.value))}
+                className="mt-1 w-full border border-slate-300 rounded-lg px-2 py-2 text-sm font-semibold text-slate-800 bg-white"
+              >
+                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>
+                    {n === 1 ? `À vista (1x de ${moeda(total)})` : `${n}x de ${moeda(total / n)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
           <div className="grid grid-cols-2 gap-2">
             <label className="text-[11px] font-bold text-slate-500">
               DESCONTO (R$)
@@ -781,7 +805,12 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
             <p className="text-4xl">✅</p>
             <h3 className="font-black text-lg text-slate-800 mt-1">Venda nº {vendaFeita.numero} registrada</h3>
             <p className="text-2xl font-black text-emerald-700 mt-2">{moeda(vendaFeita.total)}</p>
-            {vendaFeita.troco > 0 && <p className="text-sm font-bold text-slate-700 mt-1">Troco: {moeda(vendaFeita.troco)}</p>}
+            {vendaFeita.forma === 'cartao_credito' && vendaFeita.parcelas > 1 && (
+              <p className="text-sm font-bold text-slate-700 mt-1">
+                Crédito {vendaFeita.parcelas}x de {moeda(vendaFeita.total / vendaFeita.parcelas)}
+              </p>
+            )}
+            {vendaFeita.troco > 0 &&<p className="text-sm font-bold text-slate-700 mt-1">Troco: {moeda(vendaFeita.troco)}</p>}
             <div className="grid grid-cols-2 gap-2 mt-5">
               <button type="button" onClick={() => imprimirRecibo(vendaFeita, nomeLoja)} className="py-3 rounded-xl bg-blue-900 text-white font-black cursor-pointer">
                 🖨️ Imprimir
