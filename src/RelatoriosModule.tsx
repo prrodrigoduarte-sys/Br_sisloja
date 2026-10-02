@@ -48,7 +48,7 @@ export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }
 // =====================================================================
 const SENHA_ESTOQUE = '1234';
 
-function ComSenha({ children }: { children: React.ReactNode }) {
+export function ComSenha({ children, titulo = 'Estoque valorizado' }: { children: React.ReactNode; titulo?: string }) {
   const [liberado, setLiberado] = useState(false);
   const [senha, setSenha] = useState('');
   const [erro, setErro] = useState(false);
@@ -68,7 +68,7 @@ function ComSenha({ children }: { children: React.ReactNode }) {
   return (
     <form onSubmit={entrar} className="mx-auto max-w-xs space-y-3 rounded-xl bg-white p-6 text-center text-sm shadow-sm">
       <div className="text-3xl">🔒</div>
-      <p className="font-bold text-gray-800">Estoque valorizado</p>
+      <p className="font-bold text-gray-800">{titulo}</p>
       <p className="text-gray-500">Digite a senha para abrir.</p>
       <input
         type="password"
