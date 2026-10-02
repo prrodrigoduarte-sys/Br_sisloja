@@ -3,14 +3,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
+import { FORMAS_RECEBER, nomesClientes } from './ContasReceberModule';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 
-type Rel = 'estoque' | 'vendas' | 'vendas_dia';
+type Rel = 'estoque' | 'vendas' | 'vendas_dia' | 'receber';
 const RELATORIOS: { id: Rel; rotulo: string }[] = [
   { id: 'estoque', rotulo: '📦 Estoque valorizado' },
   { id: 'vendas_dia', rotulo: '🧾 Vendas do dia' },
   { id: 'vendas', rotulo: '🧑‍💼 Vendas por usuário' },
+  { id: 'receber', rotulo: '📥 Contas a receber' },
 ];
 
 export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }) {
@@ -36,6 +38,7 @@ export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }
       )}
       {rel === 'vendas' && <VendasPorUsuario loggedUser={loggedUser} />}
       {rel === 'vendas_dia' && <VendasDoDia loggedUser={loggedUser} />}
+      {rel === 'receber' && <RelatorioReceber loggedUser={loggedUser} />}
     </div>
   );
 }
@@ -659,15 +662,13 @@ const diaDe = (s: string) => new Date(s).toLocaleDateString('sv-SE'); // AAAA-MM
 const dataBR = (d: string) => d.split('-').reverse().join('/');
 const hora = (s: string) => new Date(s).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-// condição de pagamento e prazo (crédito: uma parcela a cada 30 dias, igual ao Contas a receber)
+// condição de pagamento do cliente e prazo de recebimento da loja
+// (cartão, mesmo parcelado, entra no Contas a receber já liquidado, com a taxa descontada)
 function condicao(v: any) {
   const forma = FORMAS[v.forma_pagamento] || v.forma_pagamento || '—';
   const n = Number(v.parcelas || 1);
   if (v.forma_pagamento === 'cartao_credito') {
-    return {
-      condicao: n > 1 ? `${forma} ${n}x de ${brl(r2(Number(v.total) / n))}` : `${forma} 1x`,
-      prazo: Array.from({ length: n }, (_, i) => (i + 1) * 30).join('/') + ' dias',
-    };
+    return { condicao: n > 1 ? `${forma} ${n}x de ${brl(r2(Number(v.total) / n))}` : `${forma} 1x`, prazo: 'À vista (cartão)' };
   }
   return { condicao: forma, prazo: 'À vista' };
 }
@@ -734,10 +735,12 @@ function VendasDoDia({ loggedUser }: { loggedUser: Usuario }) {
       // nomes dos clientes e códigos dos produtos
       const idsCli = Array.from(new Set(lista.map((x: any) => x.cliente_id).filter(Boolean)));
       const cli: Record<string, string> = {};
-      if (idsCli.length) {
-        const { data } = await supabase.from('clientes').select('*').in('id', idsCli);
-        ((data as any[]) || []).forEach((c) => (cli[c.id] = c.nome || c.razao_social || c.nome_fantasia || 'Cliente'));
-      }
+      await Promise.all(
+        idsCli.map(async (id: any) => {
+          const { data: c } = await supabase.rpc('obter_cliente', { p_id: id });
+          if (c) cli[id] = (c as any).nome || 'Cliente';
+        })
+      );
       setClientes(cli);
       const idsProd = Array.from(new Set(Object.values(porVenda).flat().map((it: any) => it.produto_id).filter(Boolean)));
       const sk: Record<string, string> = {};
@@ -1031,7 +1034,324 @@ function VendasDoDia({ loggedUser }: { loggedUser: Usuario }) {
       )}
       <p className="text-[11px] text-gray-400 print:hidden">
         Lucro = total da venda − custo dos produtos − taxa do cartão. Custo = custo do produto no momento da venda. Vendas canceladas não entram nos totais.
-        Prazo do crédito: uma parcela a cada 30 dias.
+        Venda no cartão (mesmo parcelada) entra recebida na hora, com a taxa descontada.
+      </p>
+    </div>
+  );
+}
+
+// =====================================================================
+// CONTAS A RECEBER: recebimentos do período (por data e forma) e posição em aberto por cliente (vencimentos)
+// =====================================================================
+type ModoReceber = 'recebimentos' | 'aberto';
+const FAIXAS = [
+  { id: 'avencer', rotulo: 'A vencer' },
+  { id: 'v30', rotulo: 'Vencido 1–30' },
+  { id: 'v60', rotulo: '31–60' },
+  { id: 'v90', rotulo: '61–90' },
+  { id: 'v90mais', rotulo: '+90 dias' },
+] as const;
+type Faixa = (typeof FAIXAS)[number]['id'];
+
+function RelatorioReceber({ loggedUser }: { loggedUser: Usuario }) {
+  const hoje = new Date().toLocaleDateString('sv-SE');
+  const [modo, setModo] = useState<ModoReceber>('recebimentos');
+  const [de, setDe] = useState(hoje.slice(0, 8) + '01');
+  const [ate, setAte] = useState(hoje);
+  const [contas, setContas] = useState<any[]>([]);
+  const [nomes, setNomes] = useState<Record<string, string>>({});
+  const [aberto, setAberto] = useState<string | null>(null);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      setErro('');
+      const r = await buscarTodos(() => {
+        const base = supabase.from('contas_receber').select('*').eq('codigo_loja', loggedUser.codigo_loja);
+        return modo === 'recebimentos'
+          ? base.eq('status', 'recebido').gte('data_recebimento', de).lte('data_recebimento', ate).order('data_recebimento').order('id')
+          : base.eq('status', 'aberto').order('vencimento').order('id');
+      });
+      if (r.error) setErro('Erro ao carregar: ' + r.error.message);
+      const l = r.data || [];
+      setContas(l);
+      setNomes(await nomesClientes(l.map((c: any) => c.cliente_id)));
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja, modo, de, ate]);
+
+  const nome = (c: any) => (c.cliente_id && nomes[c.cliente_id]) || 'Consumidor';
+  const liquido = (c: any) => Number(c.valor_recebido ?? c.valor);
+  const taxa = (c: any) => Number(c.taxa_cartao || 0);
+  const pago = (c: any) => r2(liquido(c) + taxa(c)); // o que o cliente pagou (antes da taxa)
+  const atraso = (c: any) => Math.round((new Date(hoje + 'T12:00:00').getTime() - new Date(c.vencimento + 'T12:00:00').getTime()) / 86400000);
+  const faixa = (c: any): Faixa => {
+    const d = atraso(c);
+    return d <= 0 ? 'avencer' : d <= 30 ? 'v30' : d <= 60 ? 'v60' : d <= 90 ? 'v90' : 'v90mais';
+  };
+
+  // recebimentos: por data, e resumo por forma
+  const rec = useMemo(() => {
+    if (modo !== 'recebimentos') return null;
+    const porDia = new Map<string, any[]>();
+    const porForma: Record<string, { qtd: number; pago: number; taxa: number; liquido: number }> = {};
+    const tot = { qtd: 0, pago: 0, taxa: 0, liquido: 0 };
+    for (const c of contas) {
+      const d = c.data_recebimento;
+      if (!porDia.has(d)) porDia.set(d, []);
+      porDia.get(d)!.push(c);
+      const f = (porForma[c.forma || 'outros'] ||= { qtd: 0, pago: 0, taxa: 0, liquido: 0 });
+      for (const t of [f, tot]) {
+        t.qtd++;
+        t.pago = r2(t.pago + pago(c));
+        t.taxa = r2(t.taxa + taxa(c));
+        t.liquido = r2(t.liquido + liquido(c));
+      }
+    }
+    return { dias: Array.from(porDia.entries()), porForma, tot };
+  }, [contas, modo]);
+
+  // em aberto: por cliente, separado por faixa de vencimento
+  const ab = useMemo(() => {
+    if (modo !== 'aberto') return null;
+    const vazio = () => ({ avencer: 0, v30: 0, v60: 0, v90: 0, v90mais: 0, total: 0 }) as Record<Faixa | 'total', number>;
+    const mapa = new Map<string, { chave: string; nome: string; contas: any[]; v: Record<Faixa | 'total', number> }>();
+    const tot = vazio();
+    for (const c of contas) {
+      const k = c.cliente_id || 'consumidor';
+      if (!mapa.has(k)) mapa.set(k, { chave: k, nome: nome(c), contas: [], v: vazio() });
+      const g = mapa.get(k)!;
+      g.contas.push(c);
+      const f = faixa(c);
+      g.v[f] = r2(g.v[f] + Number(c.valor));
+      g.v.total = r2(g.v.total + Number(c.valor));
+      tot[f] = r2(tot[f] + Number(c.valor));
+      tot.total = r2(tot.total + Number(c.valor));
+    }
+    return { clientes: Array.from(mapa.values()).sort((a, b) => b.v.total - a.v.total), tot };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contas, modo, nomes]);
+
+  const exportarCsv = () => {
+    const sep = ';';
+    const n = (x: number) => String(x).replace('.', ',');
+    const q = (c: any) => `"${String(c ?? '').replace(/"/g, '""')}"`;
+    const linhas: string[] = [];
+    if (modo === 'recebimentos') {
+      linhas.push(['Recebido em', 'Cliente', 'Descrição', 'Parcela', 'Vencimento', 'Forma', 'Valor pago', 'Juros', 'Desconto', 'Taxa cartão', 'Líquido'].map(q).join(sep));
+      contas.forEach((c) =>
+        linhas.push(
+          [dataBR(c.data_recebimento), nome(c), c.descricao, c.parcela || '', dataBR(c.vencimento), FORMAS_RECEBER[c.forma] || c.forma, n(pago(c)), n(Number(c.juros || 0)), n(Number(c.desconto || 0)), n(taxa(c)), n(liquido(c))]
+            .map(q)
+            .join(sep)
+        )
+      );
+    } else {
+      linhas.push(['Cliente', 'Descrição', 'Parcela', 'Documento', 'Vencimento', 'Dias de atraso', 'Valor'].map(q).join(sep));
+      contas.forEach((c) => linhas.push([nome(c), c.descricao, c.parcela || '', c.documento || '', dataBR(c.vencimento), Math.max(atraso(c), 0), n(Number(c.valor))].map(q).join(sep)));
+    }
+    const blob = new Blob(['﻿' + linhas.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = modo === 'recebimentos' ? `recebimentos-${de}-a-${ate}.csv` : `contas-em-aberto-${hoje}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm print:hidden">
+        <div className="flex overflow-hidden rounded-lg border">
+          {(
+            [
+              ['recebimentos', 'Recebimentos'],
+              ['aberto', 'Em aberto por cliente'],
+            ] as const
+          ).map(([id, rot]) => (
+            <button key={id} onClick={() => setModo(id)} className={`px-3 py-1 ${modo === id ? 'bg-gray-800 text-white' : 'hover:bg-gray-50'}`}>
+              {rot}
+            </button>
+          ))}
+        </div>
+        {modo === 'recebimentos' && (
+          <>
+            de <input type="date" value={de} onChange={(e) => setDe(e.target.value)} className="rounded border px-2 py-1" />
+            até <input type="date" value={ate} onChange={(e) => setAte(e.target.value)} className="rounded border px-2 py-1" />
+          </>
+        )}
+        <div className="flex-1" />
+        <button onClick={exportarCsv} disabled={!contas.length} className="rounded-lg border px-3 py-1 hover:bg-gray-50 disabled:opacity-40">
+          ⬇ Planilha
+        </button>
+        <button onClick={() => window.print()} className="rounded-lg border px-3 py-1 hover:bg-gray-50">
+          🖨 Imprimir
+        </button>
+      </div>
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      {carregando ? (
+        <p className="rounded-xl bg-white p-6 text-center text-sm text-gray-500 shadow-sm">Carregando…</p>
+      ) : rec ? (
+        <>
+          <div className="rounded-xl bg-white p-4 shadow-sm">
+            <h3 className="text-lg font-bold text-gray-800">Recebimentos</h3>
+            <p className="mb-3 text-xs text-gray-500">
+              {loggedUser.loja_nome} · {de === ate ? dataBR(de) : `${dataBR(de)} a ${dataBR(ate)}`}
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Quadro titulo="Recebimentos" valor={String(rec.tot.qtd)} />
+              <Quadro titulo="Valor pago pelos clientes" valor={brl(rec.tot.pago)} destaque="text-blue-800" />
+              <Quadro titulo="Taxas de cartão" valor={brl(rec.tot.taxa)} destaque={rec.tot.taxa ? 'text-red-700' : undefined} />
+              <Quadro titulo="Líquido (entrou)" valor={brl(rec.tot.liquido)} destaque="text-green-700" />
+            </div>
+            {Object.keys(rec.porForma).length > 0 && (
+              <table className="mt-3 w-full text-sm">
+                <thead className="border-b text-left text-[11px] uppercase text-gray-600">
+                  <tr>
+                    <th className="p-2">Forma</th>
+                    <th className="p-2 text-right">Qtd</th>
+                    <th className="p-2 text-right">Pago</th>
+                    <th className="p-2 text-right">Taxa</th>
+                    <th className="p-2 text-right">Líquido</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {Object.entries(rec.porForma).map(([f, t]) => (
+                    <tr key={f}>
+                      <td className="p-2">{FORMAS_RECEBER[f] || f}</td>
+                      <td className="p-2 text-right">{t.qtd}</td>
+                      <td className="p-2 text-right">{brl(t.pago)}</td>
+                      <td className="p-2 text-right text-red-700">{t.taxa ? brl(t.taxa) : '—'}</td>
+                      <td className="p-2 text-right font-semibold">{brl(t.liquido)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {!rec.dias.length && <p className="rounded-xl bg-white p-6 text-center text-sm text-gray-500 shadow-sm">Nenhum recebimento no período.</p>}
+          {rec.dias.map(([dia, l]) => (
+            <div key={dia} className="overflow-x-auto rounded-xl bg-white shadow-sm print:break-inside-avoid">
+              <div className="border-b bg-gray-50 px-3 py-2 text-sm font-bold text-gray-800">📅 {dataBR(dia)}</div>
+              <table className="w-full text-sm">
+                <thead className="border-b text-left text-[11px] uppercase text-gray-600">
+                  <tr>
+                    <th className="p-2">Cliente</th>
+                    <th className="p-2">Descrição</th>
+                    <th className="p-2">Forma</th>
+                    <th className="p-2 text-right">Pago</th>
+                    <th className="p-2 text-right">Taxa</th>
+                    <th className="p-2 text-right">Líquido</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {l.map((c: any) => (
+                    <tr key={c.id}>
+                      <td className="p-2">{nome(c)}</td>
+                      <td className="p-2 text-gray-600">
+                        {c.descricao}
+                        {c.parcela ? ` (${c.parcela})` : ''}
+                      </td>
+                      <td className="p-2 whitespace-nowrap">{FORMAS_RECEBER[c.forma] || c.forma}</td>
+                      <td className="p-2 text-right whitespace-nowrap">{brl(pago(c))}</td>
+                      <td className="p-2 text-right whitespace-nowrap text-red-700">{taxa(c) ? brl(taxa(c)) : '—'}</td>
+                      <td className="p-2 text-right whitespace-nowrap font-semibold">{brl(liquido(c))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="border-t-2 bg-gray-100 font-bold">
+                  <tr>
+                    <td className="p-2" colSpan={3}>
+                      Total {dataBR(dia)}
+                    </td>
+                    <td className="p-2 text-right">{brl(r2(l.reduce((s: number, c: any) => s + pago(c), 0)))}</td>
+                    <td className="p-2 text-right text-red-700">{brl(r2(l.reduce((s: number, c: any) => s + taxa(c), 0)))}</td>
+                    <td className="p-2 text-right text-green-700">{brl(r2(l.reduce((s: number, c: any) => s + liquido(c), 0)))}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ))}
+        </>
+      ) : ab ? (
+        <>
+          <div className="rounded-xl bg-white p-4 shadow-sm">
+            <h3 className="text-lg font-bold text-gray-800">Contas em aberto por cliente</h3>
+            <p className="mb-3 text-xs text-gray-500">
+              {loggedUser.loja_nome} · posição em {dataBR(hoje)}
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {FAIXAS.map((f) => (
+                <Quadro key={f.id} titulo={f.rotulo} valor={brl(ab.tot[f.id])} destaque={f.id === 'avencer' ? 'text-blue-800' : ab.tot[f.id] ? 'text-red-700' : undefined} />
+              ))}
+              <Quadro titulo="Total em aberto" valor={brl(ab.tot.total)} destaque="text-gray-900" />
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+            {!ab.clientes.length ? (
+              <p className="p-6 text-center text-sm text-gray-500">Nenhuma conta em aberto.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="border-b bg-gray-50 text-left text-[11px] uppercase text-gray-600">
+                  <tr>
+                    <th className="p-2">Cliente</th>
+                    {FAIXAS.map((f) => (
+                      <th key={f.id} className="p-2 text-right">
+                        {f.rotulo}
+                      </th>
+                    ))}
+                    <th className="p-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {ab.clientes.map((g) => (
+                    <React.Fragment key={g.chave}>
+                      <tr onClick={() => setAberto(aberto === g.chave ? null : g.chave)} className="cursor-pointer hover:bg-gray-50">
+                        <td className="p-2 font-medium text-gray-800">
+                          {aberto === g.chave ? '▾' : '▸'} {g.nome} <span className="text-xs font-normal text-gray-500">({g.contas.length})</span>
+                        </td>
+                        {FAIXAS.map((f) => (
+                          <td key={f.id} className={`p-2 text-right whitespace-nowrap ${g.v[f.id] && f.id !== 'avencer' ? 'text-red-700' : 'text-gray-700'}`}>
+                            {g.v[f.id] ? brl(g.v[f.id]) : '—'}
+                          </td>
+                        ))}
+                        <td className="p-2 text-right font-bold whitespace-nowrap">{brl(g.v.total)}</td>
+                      </tr>
+                      {aberto === g.chave &&
+                        g.contas.map((c: any) => (
+                          <tr key={c.id} className="bg-gray-50 text-xs text-gray-600">
+                            <td className="p-1 pl-8" colSpan={FAIXAS.length}>
+                              {c.descricao}
+                              {c.parcela ? ` (${c.parcela})` : ''} · venc. {dataBR(c.vencimento)}
+                              {atraso(c) > 0 && <b className="text-red-600"> · {atraso(c)} dia(s) de atraso</b>}
+                            </td>
+                            <td className="p-1 text-right">{brl(Number(c.valor))}</td>
+                          </tr>
+                        ))}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+                <tfoot className="border-t-2 bg-gray-100 font-bold">
+                  <tr>
+                    <td className="p-2">TOTAL</td>
+                    {FAIXAS.map((f) => (
+                      <td key={f.id} className="p-2 text-right whitespace-nowrap">
+                        {brl(ab.tot[f.id])}
+                      </td>
+                    ))}
+                    <td className="p-2 text-right whitespace-nowrap">{brl(ab.tot.total)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            )}
+          </div>
+        </>
+      ) : null}
+      <p className="text-[11px] text-gray-400 print:hidden">
+        Pago = o que o cliente pagou; Líquido = o que entrou, já sem a taxa do cartão. Vendas do PDV entram como recebidas no dia da venda.
       </p>
     </div>
   );
