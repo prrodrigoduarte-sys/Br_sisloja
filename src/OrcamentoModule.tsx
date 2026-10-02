@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
 import { SeletorCliente, type Cliente } from './ClienteVenda';
