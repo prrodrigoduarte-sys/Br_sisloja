@@ -465,7 +465,7 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
         buscarTodos(() =>
           supabase
             .from('vendas')
-            .select('id, numero, total, desconto, forma_pagamento, operador, status, created_by, created_at')
+            .select('id, numero, total, desconto, forma_pagamento, parcelas, taxa_cartao_valor, custo_total, operador, status, created_by, created_at')
             .eq('codigo_loja', loggedUser.codigo_loja)
             .gte('created_at', new Date(de + 'T00:00:00').toISOString())
             .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
@@ -474,7 +474,12 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
         ),
         supabase.rpc('nomes_usuarios'),
       ]);
-      if (v.error) setErro('Erro ao carregar as vendas: ' + v.error.message);
+      if (v.error)
+        setErro(
+          v.error.message.includes('taxa_cartao') || v.error.message.includes('custo_total')
+            ? 'Falta atualizar o banco: rode o arquivo fase6_taxas_cartao.sql no SQL Editor do Supabase.'
+            : 'Erro ao carregar as vendas: ' + v.error.message
+        );
       setVendas(v.data || []);
       const m: Record<string, string> = {};
       ((n.data as any[]) || []).forEach((x) => (m[x.user_id] = x.nome));
@@ -499,9 +504,11 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
       .map((g) => {
         const total = r2(g.vendas.reduce((s, v) => s + Number(v.total || 0), 0));
         const desconto = r2(g.vendas.reduce((s, v) => s + Number(v.desconto || 0), 0));
+        const taxa = r2(g.vendas.reduce((s, v) => s + Number(v.taxa_cartao_valor || 0), 0));
+        const lucro = r2(g.vendas.reduce((s, v) => s + lucroVenda(v), 0));
         const porForma: Record<string, number> = {};
         g.vendas.forEach((v) => (porForma[v.forma_pagamento || 'outros'] = r2((porForma[v.forma_pagamento || 'outros'] || 0) + Number(v.total || 0))));
-        return { ...g, total, desconto, porForma, ticket: g.vendas.length ? r2(total / g.vendas.length) : 0 };
+        return { ...g, total, desconto, taxa, lucro, porForma, ticket: g.vendas.length ? r2(total / g.vendas.length) : 0 };
       })
       .sort((a, b) => b.total - a.total);
   }, [vendas, nomes]);
@@ -509,7 +516,9 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
   const geral = useMemo(() => {
     const total = r2(grupos.reduce((s, g) => s + g.total, 0));
     const qtd = grupos.reduce((s, g) => s + g.vendas.length, 0);
-    return { total, qtd, ticket: qtd ? r2(total / qtd) : 0, canceladas: grupos.reduce((s, g) => s + g.canceladas, 0) };
+    const taxa = r2(grupos.reduce((s, g) => s + g.taxa, 0));
+    const lucro = r2(grupos.reduce((s, g) => s + g.lucro, 0));
+    return { total, qtd, taxa, lucro, ticket: qtd ? r2(total / qtd) : 0, canceladas: grupos.reduce((s, g) => s + g.canceladas, 0) };
   }, [grupos]);
 
   const formas = Array.from(new Set(grupos.flatMap((g) => Object.keys(g.porForma))));
@@ -531,10 +540,17 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
         <p className="mb-3 text-xs text-gray-500">
           {loggedUser.loja_nome} · {de.split('-').reverse().join('/')} a {ate.split('-').reverse().join('/')}
         </p>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           <Quadro titulo="Vendas" valor={String(geral.qtd)} />
           <Quadro titulo="Total vendido" valor={brl(geral.total)} destaque="text-blue-800" />
           <Quadro titulo="Ticket médio" valor={brl(geral.ticket)} />
+          <Quadro titulo="Taxas de cartão" valor={brl(geral.taxa)} destaque={geral.taxa ? 'text-red-700' : undefined} />
+          <Quadro
+            titulo="Lucro real"
+            valor={brl(geral.lucro)}
+            sub={geral.total > 0 ? `${pctFmt(r2((geral.lucro / geral.total) * 100))} do vendido` : ''}
+            destaque={geral.lucro >= 0 ? 'text-green-700' : 'text-red-700'}
+          />
           <Quadro titulo="Canceladas" valor={String(geral.canceladas)} destaque={geral.canceladas ? 'text-red-700' : undefined} />
         </div>
       </div>
@@ -553,6 +569,10 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
                 <th className="p-2 text-right">Total</th>
                 <th className="p-2 text-right">Ticket médio</th>
                 <th className="p-2 text-right">Descontos</th>
+                <th className="p-2 text-right">Taxas cartão</th>
+                <th className="p-2 text-right" title="Venda − custo − taxa do cartão">
+                  Lucro real
+                </th>
                 {formas.map((f) => (
                   <th key={f} className="p-2 text-right">
                     {FORMAS[f] || f}
@@ -572,6 +592,8 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
                     <td className="p-2 text-right font-semibold text-blue-800">{brl(g.total)}</td>
                     <td className="p-2 text-right">{brl(g.ticket)}</td>
                     <td className="p-2 text-right text-gray-600">{brl(g.desconto)}</td>
+                    <td className="p-2 text-right text-red-700">{g.taxa ? brl(g.taxa) : '—'}</td>
+                    <td className={`p-2 text-right font-semibold ${g.lucro < 0 ? 'text-red-600' : 'text-green-700'}`}>{brl(g.lucro)}</td>
                     {formas.map((f) => (
                       <td key={f} className="p-2 text-right text-gray-600">
                         {g.porForma[f] ? brl(g.porForma[f]) : '—'}
@@ -589,8 +611,11 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
                         <td className="p-1 text-right">{brl(Number(v.total))}</td>
                         <td />
                         <td className="p-1 text-right">{Number(v.desconto) ? brl(Number(v.desconto)) : ''}</td>
+                        <td className="p-1 text-right text-red-700">{Number(v.taxa_cartao_valor) ? brl(Number(v.taxa_cartao_valor)) : ''}</td>
+                        <td className="p-1 text-right">{brl(lucroVenda(v))}</td>
                         <td colSpan={formas.length + 1} className="p-1">
                           {FORMAS[v.forma_pagamento] || v.forma_pagamento}
+                          {v.forma_pagamento === 'cartao_credito' && Number(v.parcelas) > 1 ? ` ${v.parcelas}x` : ''}
                         </td>
                       </tr>
                     ))}
@@ -604,6 +629,8 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
                 <td className="p-2 text-right text-blue-800">{brl(geral.total)}</td>
                 <td className="p-2 text-right">{brl(geral.ticket)}</td>
                 <td className="p-2 text-right">{brl(r2(grupos.reduce((s, g) => s + g.desconto, 0)))}</td>
+                <td className="p-2 text-right text-red-700">{brl(geral.taxa)}</td>
+                <td className="p-2 text-right text-green-700">{brl(geral.lucro)}</td>
                 {formas.map((f) => (
                   <td key={f} className="p-2 text-right">
                     {brl(r2(grupos.reduce((s, g) => s + (g.porForma[f] || 0), 0)))}
@@ -615,10 +642,16 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
           </table>
         )}
       </div>
-      <p className="text-[11px] text-gray-400 print:hidden">Clique no nome do usuário para ver as vendas dele. Vendas canceladas não entram nos totais.</p>
+      <p className="text-[11px] text-gray-400 print:hidden">
+        Clique no nome do usuário para ver as vendas dele. Vendas canceladas não entram nos totais. Lucro real = venda − custo dos produtos − taxa
+        do cartão (taxas em Configurações → Taxas de cartão).
+      </p>
     </div>
   );
 }
+
+// lucro real da venda: total − custo dos produtos − taxa do cartão
+const lucroVenda = (v: any) => r2(Number(v.total || 0) - Number(v.custo_total || 0) - Number(v.taxa_cartao_valor || 0));
 
 function soma(ls: Linha[]) {
   const qtd = ls.reduce((s, l) => s + l.qtd, 0);
