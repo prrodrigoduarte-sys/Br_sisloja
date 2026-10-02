@@ -7,8 +7,9 @@ import EntradaMercadoriaModule from './EntradaMercadoriaModule';
 import FinanceiroModule from './FinanceiroModule';
 import ConfiguracoesModule from './ConfiguracoesModule';
 import RelatoriosModule from './RelatoriosModule';
+import NotasFiscaisModule from './NotasFiscaisModule';
 
-type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'relatorios' | 'configuracoes';
+type Aba = 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'notas' | 'relatorios' | 'configuracoes';
 
 type Usuario = {
   id: string;
@@ -26,6 +27,7 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
   { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
   { id: 'financeiro', rotulo: 'Financeiro', icone: '💰' },
+  { id: 'notas', rotulo: 'Nota Fiscal', icone: '📄' },
   { id: 'relatorios', rotulo: 'Relatórios', icone: '📊' },
   { id: 'configuracoes', rotulo: 'Configurações', icone: '⚙️' },
 ];
@@ -36,11 +38,12 @@ const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
   entrada: ['admin', 'gerente', 'estoquista'],
   fornecedores: ['admin', 'gerente', 'estoquista', 'financeiro'],
   financeiro: ['admin', 'gerente', 'financeiro'],
+  notas: ['admin', 'gerente', 'financeiro'],
   relatorios: ['admin', 'gerente', 'financeiro'],
   configuracoes: ['admin'],
 };
 
-const EM_BREVE = ['Nota Fiscal'];
+const EM_BREVE: string[] = [];
 
 export default function App() {
   const [carregando, setCarregando] = useState(true);
@@ -200,6 +203,7 @@ export default function App() {
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
         {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
         {aba === 'financeiro' && <FinanceiroModule loggedUser={usuario} />}
+        {aba === 'notas' && <NotasFiscaisModule loggedUser={usuario} />}
         {aba === 'relatorios' && <RelatoriosModule loggedUser={usuario} />}
         {aba === 'configuracoes' && <ConfiguracoesModule loggedUser={usuario} />}
       </main>
