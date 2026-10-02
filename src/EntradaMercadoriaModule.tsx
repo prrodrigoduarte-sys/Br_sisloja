@@ -38,7 +38,12 @@ type ItemConf = {
   det: Deteccao; // embalagem detectada (caixa, pacote, fardo, saco de 5 kg...)
   atualizar_precos: boolean;
   precos: PrecoLinha[];
+  usar_desconto: boolean; // a loja escolheu considerar o desconto da nota no custo?
+  imobilizado: boolean; // móvel/equipamento da loja (display, balcão...): não é mercadoria
 };
+
+// pistas de que o item é móvel/equipamento da loja e não mercadoria
+const PARECE_IMOBILIZADO = /\b(DISPLAY|EXPOSITOR|EXPOSITORA|GONDOLA|PRATELEIRA|BALCAO|BALC.O|MOVEL|ARARA|CHECKOUT|VITRINE|ESTANTE)\b/;
 
 type Preparo = {
   ja_importada: { id: string; numero: string; data_entrada: string } | null;
@@ -69,14 +74,24 @@ function margemPara(prep: Preparo | null, grupo: string, tabela_id: string) {
   return m ? Number(m.margem) : Number(prep.margem_padrao || 0);
 }
 
-// custo por unidade de venda (custo do item / (quantidade x fator))
+// total do item considerado no custo: pela linha da nota; o desconto só entra se a loja escolher
+const totalItem = (it: ItemConf) => arred2(it.nfe.custo_total + (it.usar_desconto ? 0 : it.nfe.desconto || 0));
+
+// custo por unidade de venda (total do item / (quantidade x fator))
 const custoVenda = (it: ItemConf) => {
   const q = it.nfe.quantidade * (it.fator || 1);
-  return q > 0 ? arred4(it.nfe.custo_total / q) : 0;
+  return q > 0 ? arred4(totalItem(it) / q) : 0;
+};
+
+// base do preço de venda: custo SEM o desconto da nota (o desconto que a loja conseguiu vira lucro a mais).
+// O custo do produto (para estoque e lucro) continua o real, com desconto: custoVenda.
+const basePreco = (it: ItemConf) => {
+  const q = it.nfe.quantidade * (it.fator || 1);
+  return q > 0 ? arred4((it.nfe.custo_total + (it.nfe.desconto || 0)) / q) : 0;
 };
 
 function recalcularPrecos(it: ItemConf, prep: Preparo | null, forcar = false): PrecoLinha[] {
-  const custo = custoVenda(it);
+  const custo = basePreco(it);
   return (prep?.tabelas || []).map((t) => {
     const atual = it.precos.find((p) => p.tabela_id === t.id);
     if (atual?.manual && !forcar) return { ...atual, margem: margemDoPreco(custo, atual.preco) };
@@ -86,7 +101,7 @@ function recalcularPrecos(it: ItemConf, prep: Preparo | null, forcar = false): P
 }
 
 export default function EntradaMercadoriaModule({ loggedUser }: { loggedUser: Usuario }) {
-  const [tela, setTela] = useState<'lista' | 'conferir' | 'margens'>('lista');
+  const [tela, setTela] = useState<'lista' | 'conferir' | 'margens' | 'patrimonio'>('lista');
   const perfil = (loggedUser?.perfil || '').toLowerCase();
   const podeLancar = ['admin', 'gerente', 'estoquista'].includes(perfil);
   const podeMargens = ['admin', 'gerente'].includes(perfil);
@@ -109,6 +124,12 @@ export default function EntradaMercadoriaModule({ loggedUser }: { loggedUser: Us
             % Margens de lucro
           </button>
         )}
+        <button
+          onClick={() => setTela('patrimonio')}
+          className={`rounded-lg px-3 py-2 text-sm ${tela === 'patrimonio' ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+        >
+          🪑 Imobilizado
+        </button>
         {podeLancar && (
           <button
             onClick={() => setTela('conferir')}
@@ -120,6 +141,7 @@ export default function EntradaMercadoriaModule({ loggedUser }: { loggedUser: Us
       </div>
       {tela === 'lista' && <ListaNotas usuario={loggedUser} />}
       {tela === 'margens' && <Margens usuario={loggedUser} />}
+      {tela === 'patrimonio' && <Patrimonio podeEditar={podeLancar || perfil === 'financeiro'} />}
       {tela === 'conferir' && <Conferencia usuario={loggedUser} aoTerminar={() => setTela('lista')} />}
     </div>
   );
@@ -158,6 +180,24 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
     setAberta(id);
     setItens([]);
     const { data } = await supabase.from('notas_entrada_itens').select('*').eq('nota_id', id).order('item');
+    setItens(data || []);
+  };
+
+  // item que veio na nota mas é móvel/equipamento da loja: sai do estoque e vai para o patrimônio
+  const paraImobilizado = async (i: any) => {
+    if (
+      !window.confirm(
+        `"${i.descricao}" é imobilizado (móvel/equipamento da loja, não é para vender)?\n\n` +
+          `• sai do estoque (${n4(Number(i.quantidade_estoque) || Number(i.quantidade))} ${i.unidade_venda || 'UN'})\n` +
+          `• o produto deixa de aparecer no PDV e na lista de estoque\n` +
+          `• vai para o Patrimônio da loja por ${brl(Number(i.total))}`
+      )
+    )
+      return;
+    const { error } = await supabase.rpc('nota_item_para_imobilizado', { p_item_id: i.id });
+    if (error) return setAviso('⚠ ' + (error.message.includes('nota_item_para_imobilizado') ? 'Falta rodar o fase12_imobilizado.sql no Supabase.' : error.message));
+    setAviso(`"${i.descricao}" foi para o imobilizado (Patrimônio) e saiu do estoque.`);
+    const { data } = await supabase.from('notas_entrada_itens').select('*').eq('nota_id', i.nota_id).order('item');
     setItens(data || []);
   };
 
@@ -215,33 +255,88 @@ function ListaNotas({ usuario }: { usuario: Usuario }) {
                   🗑 Excluir nota
                 </button>
               </div>
-              <table className="w-full text-xs">
-                <thead className="text-left text-gray-500">
-                  <tr>
-                    <th className="p-1">#</th>
-                    <th className="p-1">Produto</th>
-                    <th className="p-1 text-right">Qtd</th>
-                    <th className="p-1 text-right">Valor</th>
-                    <th className="p-1 text-right">Custo unit. final</th>
-                    <th className="p-1 text-right">Preço venda</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {itens.map((i) => (
-                    <tr key={i.id} className="border-t">
-                      <td className="p-1">{i.item}</td>
-                      <td className="p-1">{i.descricao}</td>
-                      <td className="p-1 text-right">
-                        {n4(i.quantidade)} {i.unidade}
-                        {Number(i.fator) !== 1 && <span className="text-gray-400"> ×{n4(i.fator)}</span>}
-                      </td>
-                      <td className="p-1 text-right">{brl(i.valor_produtos)}</td>
-                      <td className="p-1 text-right">{brl(i.custo_unitario)}</td>
-                      <td className="p-1 text-right">{i.preco_venda ? brl(i.preco_venda) : '—'}</td>
+              {/* a conta inteira de cada item: bruto − desconto + despesas = líquido ÷ (qtd × divisor) = custo */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-left text-gray-500">
+                    <tr>
+                      <th className="p-1">#</th>
+                      <th className="p-1">Produto</th>
+                      <th className="p-1 text-right">Qtd na nota</th>
+                      <th className="p-1 text-right" title="Quantas unidades de venda tem em cada unidade da nota">
+                        Divisor
+                      </th>
+                      <th className="p-1 text-right">Entrou no estoque</th>
+                      <th className="p-1 text-right">Valor bruto</th>
+                      <th className="p-1 text-right">Desconto</th>
+                      <th className="p-1 text-right" title="Frete, seguro, IPI, ST e outras despesas">
+                        Despesas
+                      </th>
+                      <th className="p-1 text-right">Total líquido</th>
+                      <th className="p-1 text-right" title="Total líquido ÷ quantidade que entrou no estoque">
+                        Custo unit.
+                      </th>
+                      <th className="p-1 text-right">Preço venda</th>
+                      <th className="p-1" />
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {itens.map((i) => {
+                      const fator = Number(i.fator) || 1;
+                      const entrou = Number(i.quantidade_estoque) || Number(i.quantidade) * fator;
+                      const desp = Number(i.frete || 0) + Number(i.seguro || 0) + Number(i.outras || 0) + Number(i.ipi || 0) + Number(i.st || 0);
+                      const liquido = Number(i.total) || Number(i.custo_unitario) * entrou;
+                      return (
+                        <tr key={i.id} className={`border-t ${i.imobilizado ? 'bg-amber-50 text-gray-500' : ''}`}>
+                          <td className="p-1">{i.item}</td>
+                          <td className="p-1">
+                            {i.descricao}
+                            {i.imobilizado && <span className="ml-1 rounded bg-amber-200 px-1 text-[10px] font-bold text-amber-900">🪑 IMOBILIZADO</span>}
+                          </td>
+                          <td className="p-1 text-right whitespace-nowrap">
+                            {n4(i.quantidade)} {i.unidade}
+                          </td>
+                          <td className={`p-1 text-right ${fator !== 1 ? 'font-bold text-blue-800' : 'text-gray-400'}`}>÷ {n4(fator)}</td>
+                          <td className="p-1 text-right whitespace-nowrap">
+                            {n4(entrou)} {i.unidade_venda || 'UN'}
+                          </td>
+                          <td className="p-1 text-right">{brl(i.valor_produtos)}</td>
+                          <td className="p-1 text-right text-red-600">{Number(i.desconto) ? '− ' + brl(i.desconto) : '—'}</td>
+                          <td className="p-1 text-right">{desp ? '+ ' + brl(desp) : '—'}</td>
+                          <td className="p-1 text-right font-semibold">{brl(liquido)}</td>
+                          <td className="p-1 text-right font-bold">{brl(i.custo_unitario)}</td>
+                          <td className="p-1 text-right">{i.preco_venda && !i.imobilizado ? brl(i.preco_venda) : '—'}</td>
+                          <td className="p-1 text-right">
+                            {!i.imobilizado && (
+                              <button
+                                onClick={() => paraImobilizado(i)}
+                                title="Móvel/equipamento da loja (display, balcão...): tira do estoque e manda para o Patrimônio"
+                                className="whitespace-nowrap rounded border border-amber-300 bg-white px-1.5 py-0.5 text-[10px] text-amber-800 hover:bg-amber-50"
+                              >
+                                🪑 é imobilizado
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className="border-t-2 font-bold">
+                    <tr>
+                      <td className="p-1" colSpan={5}>
+                        Total da nota
+                      </td>
+                      <td className="p-1 text-right">{brl(itens.reduce((s, i) => s + Number(i.valor_produtos || 0), 0))}</td>
+                      <td className="p-1 text-right text-red-600">− {brl(itens.reduce((s, i) => s + Number(i.desconto || 0), 0))}</td>
+                      <td className="p-1 text-right">
+                        + {brl(itens.reduce((s, i) => s + Number(i.frete || 0) + Number(i.seguro || 0) + Number(i.outras || 0) + Number(i.ipi || 0) + Number(i.st || 0), 0))}
+                      </td>
+                      <td className="p-1 text-right">{brl(itens.reduce((s, i) => s + Number(i.total || 0), 0))}</td>
+                      <td colSpan={3} />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -400,8 +495,9 @@ function Margens({ usuario }: { usuario: Usuario }) {
   return (
     <div className="rounded-xl bg-white p-4 shadow-sm">
       <p className="mb-3 text-sm text-gray-600">
-        O preço de venda é calculado assim: <b>custo final do item × (1 + margem%)</b>. O custo final já inclui frete, seguro, IPI, ST e
-        outras despesas da nota, menos o desconto. Grupo sem margem usa a linha <b>Padrão da loja</b>. Deixe vazio para usar o padrão.
+        O preço de venda é calculado assim: <b>custo do item SEM o desconto da nota × (1 + margem%)</b>. Esse custo inclui frete, seguro,
+        IPI, ST e outras despesas; o desconto que a loja conseguiu não reduz o preço (vira lucro a mais). O custo do produto, usado no estoque e
+        no lucro, continua o real, com desconto. Grupo sem margem usa a linha <b>Padrão da loja</b>. Deixe vazio para usar o padrão.
       </p>
       <div className="overflow-x-auto">
         <table className="text-sm">
@@ -623,6 +719,8 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
   const [confirmando, setConfirmando] = useState(false);
   const [resultado, setResultado] = useState<any>(null);
   const [buscaIdx, setBuscaIdx] = useState<number | null>(null);
+  // nota com desconto: a loja decide se o desconto entra no custo (null = ainda não respondeu)
+  const [usarDesconto, setUsarDesconto] = useState<boolean | null>(null);
 
   const escolherArquivo = async (arq: File | undefined) => {
     if (!arq) return;
@@ -642,6 +740,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
       });
       if (error) throw new Error('Erro ao consultar o banco: ' + error.message);
       const p = data as Preparo;
+      setUsarDesconto(null);
       setXml(texto);
       setNfe(nota);
       setPrep(p);
@@ -665,6 +764,8 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
             det: detectarEmbalagem(i.unidade, i.descricao, i.fator_sugerido),
             atualizar_precos: true,
             precos: [],
+            usar_desconto: false,
+            imobilizado: PARECE_IMOBILIZADO.test(i.descricao.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')),
           };
           base.precos = recalcularPrecos(base, p, true);
           return base;
@@ -692,7 +793,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
     setItens((lista) =>
       lista.map((it, i) => {
         if (i !== idx) return it;
-        const custo = custoVenda(it);
+        const custo = basePreco(it);
         return {
           ...it,
           precos: it.precos.map((p) =>
@@ -708,19 +809,24 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
   };
 
   const resumo = useMemo(() => {
-    const novos = itens.filter((i) => i.novo).length;
-    const semVinculo = itens.filter((i) => !i.novo && !i.produto).length;
+    const novos = itens.filter((i) => i.novo && !i.imobilizado).length;
+    const semVinculo = itens.filter((i) => !i.novo && !i.produto && !i.imobilizado).length;
     const somaDup = arred2((nfe?.duplicatas || []).reduce((s, d) => s + d.valor, 0));
     return { novos, semVinculo, somaDup };
   }, [itens, nfe]);
 
   const confirmar = async () => {
     if (!nfe || !prep) return;
+    if (nfe.itens.some((i) => (i.desconto || 0) > 0) && usarDesconto === null)
+      return setErro('Responda antes: o desconto da nota entra ou não no custo dos produtos? (quadro amarelo acima dos itens)');
     if (resumo.semVinculo) return setErro('Há itens sem produto escolhido. Vincule a um produto ou marque como produto novo.');
-    const semNome = itens.find((i) => i.novo && !i.nome_novo.trim());
+    const mercadorias = itens.filter((i) => !i.imobilizado);
+    const imobilizados = itens.filter((i) => i.imobilizado);
+    if (!mercadorias.length) return setErro('Todos os itens estão marcados como imobilizado: não há mercadoria para lançar no estoque.');
+    const semNome = mercadorias.find((i) => i.novo && !i.nome_novo.trim());
     if (semNome) return setErro(`Informe o nome do produto novo do item ${semNome.nfe.item}.`);
-    const fracionados = itens.filter((i) => i.fracionado && i.fator !== 1);
-    const semFracionar = itens.filter((i) => i.det.eh_embalagem && !i.fracionado);
+    const fracionados = mercadorias.filter((i) => i.fracionado && i.fator !== 1);
+    const semFracionar = mercadorias.filter((i) => i.det.eh_embalagem && !i.fracionado);
     const aviso =
       (fracionados.length
         ? `\n\nFracionados:\n${fracionados
@@ -731,6 +837,9 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
         ? `\n\n⚠ Vieram em embalagem e vão entrar como estão na nota (sem fracionar):\n${semFracionar
             .map((i) => `• ${i.nfe.descricao}: ${n4(i.nfe.quantidade)} ${i.nfe.unidade}`)
             .join('\n')}`
+        : '') +
+      (imobilizados.length
+        ? `\n\n🪑 Imobilizado (não entra no estoque, vai para o Patrimônio):\n${imobilizados.map((i) => `• ${i.nfe.descricao}: ${brl(totalItem(i))}`).join('\n')}`
         : '');
     if (!window.confirm(`Confirmar a entrada da NF ${nfe.numero}?\n\nO estoque será lançado e ${resumo.novos} produto(s) novo(s) serão cadastrados.${aviso}`)) return;
     setConfirmando(true);
@@ -756,7 +865,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
       totais: nfe.totais,
       gerar_contas: gerarContas,
       duplicatas: nfe.duplicatas,
-      itens: itens.map((it) => ({
+      itens: mercadorias.map((it) => ({
         item: it.nfe.item,
         codigo_fornecedor: it.nfe.codigo_fornecedor,
         ean: it.nfe.ean,
@@ -774,12 +883,12 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
         valor_produtos: it.nfe.valor_produtos,
         frete: it.nfe.frete,
         seguro: it.nfe.seguro,
-        desconto: it.nfe.desconto,
+        desconto: it.usar_desconto ? it.nfe.desconto : 0, // só o desconto que a loja aceitou no custo
         outras: it.nfe.outras,
         ipi: it.nfe.ipi,
         st: it.nfe.st,
         icms: it.nfe.icms,
-        custo_total: it.nfe.custo_total,
+        custo_total: totalItem(it),
         custo_unitario_final: custoVenda(it),
         produto_id: it.novo ? null : it.produto?.id,
         novo_produto: it.novo
@@ -795,9 +904,28 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
       })),
     };
     const { data, error } = await supabase.rpc('confirmar_nota_entrada', { p_nota: payload });
+    if (error) {
+      setConfirmando(false);
+      return setErro('Não foi possível confirmar: ' + error.message);
+    }
+    // imobilizado: vai para o patrimônio da loja, ligado à nota
+    let erroPatrimonio = '';
+    if (imobilizados.length) {
+      const { error: e2 } = await supabase.from('patrimonio').insert(
+        imobilizados.map((it) => ({
+          descricao: it.nfe.descricao,
+          quantidade: it.nfe.quantidade,
+          valor: totalItem(it),
+          data_aquisicao: dataEntrada,
+          fornecedor: nfe.emitente.nome_fantasia || nfe.emitente.razao_social,
+          nota_id: (data as any)?.nota_id || null,
+          nota_numero: nfe.numero,
+        }))
+      );
+      if (e2) erroPatrimonio = e2.message.includes('patrimonio') ? 'rode o fase12_imobilizado.sql no Supabase' : e2.message;
+    }
     setConfirmando(false);
-    if (error) return setErro('Não foi possível confirmar: ' + error.message);
-    setResultado(data);
+    setResultado({ ...(data as any), imobilizados: imobilizados.length, erro_patrimonio: erroPatrimonio });
   };
 
   // ---------- resultado ----------
@@ -811,6 +939,10 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
           <li>{resultado.itens} item(ns) lançado(s) no estoque.</li>
           {resultado.produtos_criados > 0 && <li>{resultado.produtos_criados} produto(s) novo(s) cadastrado(s).</li>}
           {resultado.contas_criadas > 0 && <li>{resultado.contas_criadas} conta(s) a pagar gerada(s).</li>}
+          {resultado.imobilizados > 0 && !resultado.erro_patrimonio && <li>🪑 {resultado.imobilizados} item(ns) imobilizado(s) foram para o Patrimônio.</li>}
+          {resultado.erro_patrimonio && (
+            <li className="text-red-600">⚠ Os itens imobilizados não foram para o Patrimônio ({resultado.erro_patrimonio}). Lance-os em 🪑 Imobilizado.</li>
+          )}
         </ul>
         <button onClick={aoTerminar} className="mt-5 rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700">
           Ver notas lançadas
@@ -836,6 +968,12 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
 
   // ---------- conferência ----------
   const lojaDiferente = prep.loja_cnpj && nfe.destinatario_cnpj && prep.loja_cnpj.replace(/\D/g, '') !== nfe.destinatario_cnpj;
+  const somaDescontos = arred2(nfe.itens.reduce((s, i) => s + (i.desconto || 0), 0));
+  const temDesconto = somaDescontos > 0;
+  const escolherDesconto = (v: boolean) => {
+    setUsarDesconto(v);
+    setItens((l) => l.map((it) => ({ ...it, usar_desconto: v })));
+  };
 
   return (
     <div className="space-y-3">
@@ -904,12 +1042,42 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
         ))}
       </div>
 
+      {/* desconto: pergunta antes de calcular o custo */}
+      {temDesconto && (
+        <div className={`rounded-xl p-4 text-sm shadow-sm ${usarDesconto === null ? 'bg-amber-50 ring-2 ring-amber-300' : 'bg-white'}`}>
+          <p className="font-bold text-gray-800">
+            Esta nota tem {brl(somaDescontos)} de desconto. Posso considerar o desconto na divisão do custo dos produtos?
+          </p>
+          <p className="mt-0.5 text-xs text-gray-600">
+            O custo de cada produto é o valor da linha da nota ÷ (quantidade × divisor). O preço de venda é sempre calculado sobre o valor da linha, sem
+            o desconto.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              onClick={() => escolherDesconto(false)}
+              className={`rounded-lg border px-3 py-2 text-left ${usarDesconto === false ? 'border-blue-700 bg-blue-700 text-white' : 'bg-white hover:bg-gray-50'}`}
+            >
+              <b>Não</b> — custo pelo valor da linha (sem desconto)
+            </button>
+            <button
+              onClick={() => escolherDesconto(true)}
+              className={`rounded-lg border px-3 py-2 text-left ${usarDesconto === true ? 'border-blue-700 bg-blue-700 text-white' : 'bg-white hover:bg-gray-50'}`}
+            >
+              <b>Sim</b> — custo com o desconto de cada linha
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* itens */}
       <div className="space-y-2">
         {itens.map((it, idx) => {
           const custo = custoVenda(it);
           return (
-            <div key={idx} className={`rounded-xl bg-white p-3 shadow-sm ${!it.novo && !it.produto ? 'ring-2 ring-red-300' : ''}`}>
+            <div
+              key={idx}
+              className={`rounded-xl p-3 shadow-sm ${it.imobilizado ? 'bg-amber-50 ring-1 ring-amber-300' : 'bg-white'} ${!it.imobilizado && !it.novo && !it.produto ? 'ring-2 ring-red-300' : ''}`}
+            >
               <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
                 <div className="min-w-0 flex-1">
                   <div className="text-xs text-gray-400">
@@ -931,6 +1099,7 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                       </span>
                     )}{' '}
                     = <b>{brl(it.nfe.custo_total)}</b>
+                    {it.nfe.desconto > 0 && !it.usar_desconto && <span className="text-gray-500"> · no custo: {brl(totalItem(it))} (sem o desconto)</span>}
                   </div>
                 </div>
                 <div className="text-right">
@@ -941,9 +1110,23 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                       antes {brl(Number(it.produto.custo))}
                     </div>
                   )}
+                  {it.nfe.desconto > 0 && it.usar_desconto && (
+                    <div className="mt-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-900" title="O preço de venda é calculado sobre o valor da linha, sem o desconto">
+                      base do preço (linha, sem desconto): <b>{brl(basePreco(it))}</b>
+                    </div>
+                  )}
                 </div>
               </div>
 
+              {/* imobilizado: móvel/equipamento da loja (display, balcão...) não é mercadoria */}
+              <label className={`mt-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${it.imobilizado ? 'bg-amber-100 font-semibold text-amber-900' : 'text-gray-600'}`}>
+                <input type="checkbox" checked={it.imobilizado} onChange={(e) => alterar(idx, { imobilizado: e.target.checked }, 'nao')} className="h-4 w-4" />
+                🪑 Imobilizado — móvel ou equipamento da loja (display, balcão, expositor), não é para vender
+                {it.imobilizado && <span className="font-normal">· não entra no estoque, vai para o Patrimônio por {brl(totalItem(it))}</span>}
+              </label>
+
+              {!it.imobilizado && (
+              <>
               {/* vínculo com produto */}
               <div className="mt-2 grid gap-2 rounded-lg bg-gray-50 p-2 sm:grid-cols-12">
                 <div className="sm:col-span-6">
@@ -1052,6 +1235,8 @@ function Conferencia({ usuario, aoTerminar }: { usuario: Usuario; aoTerminar: ()
                   </label>
                 )}
               </div>
+              </>
+              )}
             </div>
           );
         })}
