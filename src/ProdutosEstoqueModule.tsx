@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
 import AjustePrecosModule from './AjustePrecosModule';
 import AjusteEstoqueModule from './AjusteEstoqueModule';
+import { buscarNcm, type NcmSugestao } from './ncmBusca';
 
 // Produtos, tabelas de preço e estoque (físico / fiscal / administrativo).
 // Quem altera saldo é sempre a função movimentar_estoque do banco (fica registrado no histórico).
@@ -74,9 +75,22 @@ function Oculto({ texto, mascara }: { texto: string; mascara: string }) {
 
 const CustoOculto = ({ valor }: { valor: number }) => <Oculto texto={moeda(valor || 0)} mascara="R$ ••••" />;
 
+// dados achados pelo nome no cadastro manual (produto parecido já cadastrado ou item de nota fiscal recebida)
+type Achado = {
+  origem: string;
+  nome: string;
+  codigo_barras: string | null;
+  unidade: string | null;
+  ncm: string | null;
+  cest: string | null;
+  cfop: string | null;
+  csosn_cst: string | null;
+  custo: number | null;
+};
+
 export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any }) {
   const codigoLoja: string = loggedUser?.codigo_loja || '';
-  const perfil: string = loggedUser?.perfil || '';
+  const perfil: string = (loggedUser?.perfil || '').toLowerCase();
   const podeCadastrar = ['admin', 'gerente', 'estoquista'].includes(perfil);
 
   const [produtos, setProdutos] = useState<Produto[]>([]);
@@ -100,6 +114,13 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
   const [precosTab, setPrecosTab] = useState<Record<string, string>>({});
   const [salvando, setSalvando] = useState(false);
   const [novaTabela, setNovaTabela] = useState('');
+  const [achados, setAchados] = useState<Achado[]>([]);
+  const [ncmRede, setNcmRede] = useState<NcmSugestao[]>([]);
+  const [buscandoDados, setBuscandoDados] = useState(false);
+  const [erroRede, setErroRede] = useState('');
+  const [dadosAbertos, setDadosAbertos] = useState(false); // "Dados fiscais" aberto
+  const [preenchidoDe, setPreenchidoDe] = useState(''); // de onde vieram os dados preenchidos sozinhos
+  const ncmAuto = useRef(''); // NCM que o sistema preencheu: pode trocar enquanto o nome muda; o digitado à mão não
 
   // modal movimento
   const [movProduto, setMovProduto] = useState<Produto | null>(null);
@@ -157,12 +178,124 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
     [produtos, saldos]
   );
 
+  // cadastro manual: ao digitar o nome, procura os dados (NCM, CEST, CFOP, cód. barras...) para conferir e usar
+  useEffect(() => {
+    setAchados([]);
+    setNcmRede([]);
+    setErroRede('');
+    const nome = form.nome.trim();
+    if (!modalProduto || editando || nome.length < 3) return;
+    let cancelado = false;
+    const t = setTimeout(async () => {
+      setBuscandoDados(true);
+      const palavras = nome.toLowerCase().split(/\s+/).filter((p) => p.length >= 2);
+      const lista: Achado[] = [];
+      // 1) produtos da loja com nome parecido e NCM preenchido
+      produtos
+        .filter((p) => p.ncm && palavras.every((w) => p.nome.toLowerCase().includes(w)))
+        .slice(0, 3)
+        .forEach((p) =>
+          lista.push({
+            origem: 'produto já cadastrado',
+            nome: p.nome,
+            codigo_barras: p.codigo_barras,
+            unidade: p.unidade,
+            ncm: p.ncm,
+            cest: p.cest,
+            cfop: p.cfop_padrao,
+            csosn_cst: p.csosn_cst,
+            custo: p.custo || null,
+          })
+        );
+      // 2) itens de notas fiscais já recebidas (dados vindos do fornecedor)
+      const termo = palavras.slice(0, 3).join('%');
+      const { data } = await supabase
+        .from('notas_entrada_itens')
+        .select('descricao, ean, unidade, ncm, cest, custo_unitario')
+        .ilike('descricao', `%${termo}%`)
+        .not('ncm', 'is', null)
+        .order('id', { ascending: false })
+        .limit(10);
+      const vistos = new Set(lista.map((a) => a.nome.toUpperCase()));
+      ((data as any[]) || []).forEach((i) => {
+        if (vistos.has(String(i.descricao).toUpperCase()) || lista.length >= 5) return;
+        vistos.add(String(i.descricao).toUpperCase());
+        lista.push({
+          origem: 'nota fiscal recebida',
+          nome: i.descricao,
+          codigo_barras: i.ean,
+          unidade: i.unidade,
+          ncm: i.ncm,
+          cest: i.cest,
+          cfop: null, // o CFOP da nota é o de venda do fornecedor; o da loja fica o padrão
+          csosn_cst: null,
+          custo: Number(i.custo_unitario) || null,
+        });
+      });
+      if (cancelado) return;
+      setAchados(lista);
+      // preenche sozinho com o mais parecido (se o NCM não foi digitado à mão)
+      const podeTrocar = !form.ncm || form.ncm === ncmAuto.current;
+      if (lista[0] && podeTrocar) {
+        usarAchado(lista[0], true);
+        setPreenchidoDe(`${lista[0].origem}: ${lista[0].nome}`);
+      }
+      // 3) internet: tabela oficial de NCM, pelo nome
+      try {
+        const r = await buscarNcm(nome);
+        if (cancelado) return;
+        setNcmRede(r);
+        if (!lista[0] && r[0] && podeTrocar) {
+          escolherNcm(r[0].codigo, true);
+          setPreenchidoDe(`tabela oficial de NCM (internet): ${r[0].descricao.split(' › ').slice(-2).join(' › ')}`);
+        }
+      } catch {
+        if (!cancelado) setErroRede('Não consegui consultar a tabela de NCM na internet agora.');
+      }
+      if (!cancelado) setBuscandoDados(false);
+    }, 600);
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+      setBuscandoDados(false);
+    };
+  }, [form.nome, modalProduto, editando, produtos]);
+
+  const escolherNcm = (codigo: string, automatico = false) => {
+    const ncm = codigo.replace(/\D/g, '');
+    ncmAuto.current = automatico ? ncm : '';
+    if (!automatico) setPreenchidoDe('');
+    setForm((f) => ({ ...f, ncm }));
+    setDadosAbertos(true);
+  };
+
+  const usarAchado = (a: Achado, automatico = false) => {
+    ncmAuto.current = automatico ? (a.ncm || '').replace(/\D/g, '') : '';
+    if (!automatico) setPreenchidoDe('');
+    setForm((f) => ({
+      ...f,
+      // cód. barras e custo são de um produto específico: só entram quando a pessoa clica em "Usar estes dados"
+      codigo_barras: automatico ? f.codigo_barras : f.codigo_barras || a.codigo_barras || '',
+      // a unidade da nota é a do fornecedor (CX, FD...): sozinha só vem de produto já cadastrado
+      unidade: automatico && a.origem !== 'produto já cadastrado' ? f.unidade : a.unidade || f.unidade,
+      custo: automatico ? f.custo : f.custo || (a.custo ? String(a.custo).replace('.', ',') : ''),
+      ncm: (a.ncm || f.ncm).replace(/\D/g, ''),
+      cest: a.cest || f.cest,
+      cfop_padrao: a.cfop || f.cfop_padrao,
+      csosn_cst: a.csosn_cst || f.csosn_cst,
+    }));
+    setDadosAbertos(true);
+  };
+
   // ---------- produto ----------
   const abrirNovo = () => {
     setEditando(null);
     setForm({ ...formVazio });
     setPrecosTab({});
     setMsg('');
+    setDadosAbertos(false);
+    setPreenchidoDe('');
+    ncmAuto.current = '';
     setModalProduto(true);
   };
 
@@ -189,6 +322,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
     (data || []).forEach((x: any) => (m[x.tabela_id] = String(x.preco)));
     setPrecosTab(m);
     setMsg('');
+    setDadosAbertos(false);
     setModalProduto(true);
   };
 
@@ -424,7 +558,10 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                     <p className="font-bold text-slate-800 leading-tight">
                       {p.nome}
                       {viaNF.has(p.id) && (
-                        <span className="ml-1.5 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">📄 via NF</span>
+                        <>
+                          <span className="ml-1.5 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">📄 via NF</span>
+                          <span className="ml-1 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">✓ conferido</span>
+                        </>
                       )}
                     </p>
                     <p className="text-[11px] text-slate-500">
@@ -499,7 +636,60 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               </div>
               <div className="col-span-2">
                 <label className={rotulo}>NOME *</label>
-                <input className={campo} value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} required />
+                <input
+                  className={campo}
+                  value={form.nome}
+                  onChange={(e) => setForm({ ...form, nome: e.target.value })}
+                  placeholder="Digite a descrição: os dados (NCM, CEST, cód. barras...) são buscados sozinhos"
+                  required
+                />
+                {!editando && preenchidoDe && (
+                  <p className="mt-1 rounded-lg bg-violet-600 px-2 py-1 text-[11px] font-bold text-white">
+                    ✓ Dados preenchidos automaticamente ({preenchidoDe}). Confira em "Dados fiscais" antes de salvar.
+                  </p>
+                )}
+                {!editando && form.nome.trim().length >= 3 && (buscandoDados || achados.length > 0 || ncmRede.length > 0 || erroRede) && (
+                  <div className="mt-2 rounded-lg border border-violet-200 bg-violet-50 p-2 space-y-2">
+                    <p className="text-[11px] font-bold text-violet-900">
+                      {buscandoDados ? '🔎 Procurando os dados deste produto...' : '🔎 Outras opções encontradas (clique para trocar)'}
+                    </p>
+                    {achados.map((a, i) => (
+                      <div key={i} className="flex flex-wrap items-center gap-2 rounded-lg bg-white p-2 text-xs">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-slate-800 leading-tight">{a.nome}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {a.origem} · NCM {a.ncm}
+                            {a.cest ? ` · CEST ${a.cest}` : ''}
+                            {a.codigo_barras ? ` · EAN ${a.codigo_barras}` : ''}
+                            {a.unidade ? ` · ${a.unidade}` : ''}
+                          </p>
+                        </div>
+                        <button type="button" onClick={() => usarAchado(a)} className="px-2.5 py-1 bg-violet-600 text-white font-bold rounded-lg cursor-pointer">
+                          Usar estes dados
+                        </button>
+                      </div>
+                    ))}
+                    {ncmRede.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-violet-900">NCM pela tabela oficial (internet), escolha o que corresponde ao produto:</p>
+                        {ncmRede.map((n) => (
+                          <button
+                            type="button"
+                            key={n.codigo}
+                            onClick={() => escolherNcm(n.codigo)}
+                            title={n.descricao}
+                            className={`block w-full rounded-lg px-2 py-1 text-left text-[11px] cursor-pointer ${
+                              form.ncm === n.codigo.replace(/\D/g, '') ? 'bg-violet-600 text-white' : 'bg-white text-slate-700 hover:bg-violet-100'
+                            }`}
+                          >
+                            <b>{n.codigo}</b> · {n.descricao.length > 140 ? '…' + n.descricao.slice(-140) : n.descricao}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {erroRede && <p className="text-[11px] text-rose-700">{erroRede}</p>}
+                  </div>
+                )}
               </div>
               <div>
                 <label className={rotulo}>UNIDADE</label>
@@ -537,12 +727,20 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               </div>
             </div>
 
-            <details className="border-t pt-3">
+            <details className="border-t pt-3" open={dadosAbertos} onToggle={(e) => setDadosAbertos((e.target as HTMLDetailsElement).open)}>
               <summary className="text-xs font-black text-slate-700 cursor-pointer">Dados fiscais (para a nota fiscal)</summary>
               <div className="grid grid-cols-2 gap-3 mt-3">
                 <div>
                   <label className={rotulo}>NCM</label>
-                  <input className={campo} value={form.ncm} onChange={(e) => setForm({ ...form, ncm: e.target.value })} />
+                  <input
+                    className={campo}
+                    value={form.ncm}
+                    onChange={(e) => {
+                      ncmAuto.current = '';
+                      setPreenchidoDe('');
+                      setForm({ ...form, ncm: e.target.value });
+                    }}
+                  />
                 </div>
                 <div>
                   <label className={rotulo}>CEST</label>
