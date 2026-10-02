@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
+import NotaFiscalVenda from './NotaFiscalVenda';
 
 // ------------------------------------------------------------
 // PDV (frente de caixa) — pensado para celular primeiro.
@@ -31,6 +32,7 @@ interface ItemCarrinho {
 }
 
 interface VendaFeita {
+  id?: string;
   numero: number;
   total: number;
   troco: number;
@@ -153,17 +155,94 @@ function LeitorCamera({ aoLer, aoFechar }: { aoLer: (codigo: string) => void; ao
 }
 
 // ---------- Recibo (impressão pelo navegador) ----------
-function imprimirRecibo(v: VendaFeita, loja: string) {
+// 'a4meia' = meia folha A4 (parte de cima da folha, com linha de corte) | 'cupom' = bobina estreita (80 mm)
+type FormatoRecibo = 'a4meia' | 'cupom';
+
+function imprimirRecibo(v: VendaFeita, loja: string, formato: FormatoRecibo = 'a4meia') {
+  const forma =
+    (FORMAS.find((f) => f.id === v.forma)?.rotulo || v.forma) +
+    (v.forma === 'cartao_credito' ? (v.parcelas > 1 ? ` ${v.parcelas}x de ${moeda(v.total / v.parcelas)}` : ' à vista') : '');
+  const html = formato === 'cupom' ? htmlCupom(v, loja, forma) : htmlMeiaA4(v, loja, forma);
+
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  iframe.style.border = '0';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentWindow?.document;
+  if (!doc || !iframe.contentWindow) return;
+  doc.open();
+  doc.write(html);
+  doc.close();
+  setTimeout(() => {
+    iframe.contentWindow?.focus();
+    iframe.contentWindow?.print();
+    setTimeout(() => iframe.remove(), 2000);
+  }, 250);
+}
+
+function htmlMeiaA4(v: VendaFeita, loja: string, forma: string) {
+  const qtd = (n: number) => n.toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+  const linhas = v.itens
+    .map(
+      (i, k) =>
+        `<tr><td class="c">${k + 1}</td><td>${esc(i.nome)}</td><td class="d">${qtd(i.quantidade)}</td><td class="d">${moeda(i.preco)}</td><td class="d">${moeda(i.subtotal)}</td></tr>`
+    )
+    .join('');
+  const bruto = v.itens.reduce((s, i) => s + i.subtotal, 0);
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Venda ${v.numero}</title>
+<style>
+@page{size:A4 portrait;margin:0}
+*{box-sizing:border-box}
+body{font-family:Arial,Helvetica,sans-serif;font-size:11px;margin:0;color:#000}
+.folha{width:210mm;min-height:148.5mm;padding:9mm 12mm 7mm;border-bottom:1px dashed #888;display:flex;flex-direction:column}
+.topo{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #000;padding-bottom:4px}
+h1{font-size:17px;margin:0}
+.num{text-align:right;font-size:12px}
+.num b{font-size:15px}
+table.itens{width:100%;border-collapse:collapse;margin-top:6px}
+.itens th{font-size:9px;text-transform:uppercase;text-align:left;border-bottom:1px solid #000;padding:3px 4px}
+.itens td{padding:3px 4px;border-bottom:1px dotted #bbb;vertical-align:top}
+.c{text-align:center;width:22px}.d{text-align:right;white-space:nowrap}
+.rodape{margin-top:auto;display:flex;justify-content:space-between;gap:16px;padding-top:6px;border-top:1px solid #000}
+.pag td{padding:1px 0}
+.tot{min-width:200px}.tot td{padding:1px 0}.tot .g td{font-size:15px;font-weight:bold;border-top:1px solid #000;padding-top:3px}
+.obs{font-size:9px;color:#444;margin-top:4px;text-align:center}
+</style></head><body><div class="folha">
+<div class="topo">
+  <div><h1>${esc(loja)}</h1><div>Comprovante de venda</div></div>
+  <div class="num">Venda nº <b>${v.numero}</b><br>${esc(v.data)}</div>
+</div>
+<table class="itens">
+  <thead><tr><th class="c">#</th><th>Produto</th><th class="d">Qtd</th><th class="d">Unitário</th><th class="d">Total</th></tr></thead>
+  <tbody>${linhas}</tbody>
+</table>
+<div class="rodape">
+  <table class="pag">
+    <tr><td><b>Pagamento:</b> ${esc(forma)}</td></tr>
+    ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido: ${moeda(v.recebido)} · Troco: ${moeda(v.troco)}</td></tr>` : ''}
+    <tr><td>Itens: ${v.itens.length}</td></tr>
+  </table>
+  <table class="tot">
+    ${v.desconto > 0 ? `<tr><td>Subtotal</td><td class="d">${moeda(bruto)}</td></tr><tr><td>Desconto</td><td class="d">- ${moeda(v.desconto)}</td></tr>` : ''}
+    <tr class="g"><td>TOTAL</td><td class="d">${moeda(v.total)}</td></tr>
+  </table>
+</div>
+<div class="obs">Documento sem valor fiscal · Obrigado pela preferência!</div>
+</div></body></html>`;
+}
+
+function htmlCupom(v: VendaFeita, loja: string, forma: string) {
   const linhas = v.itens
     .map(
       (i) =>
         `<tr><td>${esc(i.nome)}<br><small>${i.quantidade} x ${moeda(i.preco)}</small></td><td style="text-align:right">${moeda(i.subtotal)}</td></tr>`
     )
     .join('');
-  const forma =
-    (FORMAS.find((f) => f.id === v.forma)?.rotulo || v.forma) +
-    (v.forma === 'cartao_credito' ? (v.parcelas > 1 ? ` ${v.parcelas}x de ${moeda(v.total / v.parcelas)}` : ' à vista') : '');
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Venda ${v.numero}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Venda ${v.numero}</title>
 <style>
 @page{margin:8mm}
 body{font-family:Arial,Helvetica,sans-serif;font-size:12px;max-width:320px;margin:0 auto;color:#000}
@@ -187,25 +266,6 @@ ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido</td><td style
 </table>
 <p style="margin-top:10px">Obrigado pela preferência!</p>
 </body></html>`;
-
-  const iframe = document.createElement('iframe');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  document.body.appendChild(iframe);
-  const doc = iframe.contentWindow?.document;
-  if (!doc || !iframe.contentWindow) return;
-  doc.open();
-  doc.write(html);
-  doc.close();
-  setTimeout(() => {
-    iframe.contentWindow?.focus();
-    iframe.contentWindow?.print();
-    setTimeout(() => iframe.remove(), 2000);
-  }, 250);
 }
 
 // ---------- Vendas do dia: ver itens, reimprimir e cancelar ----------
@@ -257,7 +317,7 @@ function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoF
     await itensDe(v.id);
   };
 
-  const reimprimir = async (v: any) => {
+  const reimprimir = async (v: any, formato: FormatoRecibo) => {
     const l = await itensDe(v.id);
     imprimirRecibo(
       {
@@ -271,7 +331,8 @@ function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoF
         itens: l.map((i) => ({ nome: i.nome, quantidade: Number(i.quantidade), preco: Number(i.preco_unitario), subtotal: Number(i.subtotal) })),
         data: new Date(v.created_at).toLocaleString('pt-BR'),
       },
-      nomeLoja
+      nomeLoja,
+      formato
     );
   };
 
@@ -359,8 +420,11 @@ function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoF
                       </p>
                     )}
                     <div className="mt-2 flex gap-2">
-                      <button type="button" onClick={() => reimprimir(v)} className="rounded-lg bg-blue-900 px-3 py-1.5 font-bold text-white cursor-pointer">
-                        🖨️ Reimprimir
+                      <button type="button" onClick={() => reimprimir(v, 'a4meia')} className="rounded-lg bg-blue-900 px-3 py-1.5 font-bold text-white cursor-pointer">
+                        🖨️ Meia A4
+                      </button>
+                      <button type="button" onClick={() => reimprimir(v, 'cupom')} className="rounded-lg border border-blue-900 px-3 py-1.5 font-bold text-blue-900 cursor-pointer">
+                        🧾 Cupom
                       </button>
                       {!cancel && (
                         <button
@@ -375,6 +439,7 @@ function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoF
                         </button>
                       )}
                     </div>
+                    <NotaFiscalVenda vendaId={v.id} cancelada={cancel} />
                   </div>
                 )}
               </div>
@@ -682,6 +747,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     }
     const r: any = data;
     setVendaFeita({
+      id: r.id,
       numero: Number(r.numero),
       total: Number(r.total),
       troco: Number(r.troco),
@@ -1036,7 +1102,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       {/* Venda concluída */}
       {vendaFeita && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-sm p-5 text-center">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-5 text-center max-h-[92dvh] overflow-y-auto">
             <p className="text-4xl">✅</p>
             <h3 className="font-black text-lg text-slate-800 mt-1">Venda nº {vendaFeita.numero} registrada</h3>
             <p className="text-2xl font-black text-emerald-700 mt-2">{moeda(vendaFeita.total)}</p>
@@ -1047,13 +1113,25 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
             )}
             {vendaFeita.troco > 0 &&<p className="text-sm font-bold text-slate-700 mt-1">Troco: {moeda(vendaFeita.troco)}</p>}
             <div className="grid grid-cols-2 gap-2 mt-5">
-              <button type="button" onClick={() => imprimirRecibo(vendaFeita, nomeLoja)} className="py-3 rounded-xl bg-blue-900 text-white font-black cursor-pointer">
-                🖨️ Imprimir
+              <button type="button" onClick={() => imprimirRecibo(vendaFeita, nomeLoja, 'a4meia')} className="py-3 rounded-xl bg-blue-900 text-white font-black cursor-pointer">
+                🖨️ Meia A4
               </button>
-              <button type="button" onClick={novaVenda} className="py-3 rounded-xl bg-amber-400 text-slate-900 font-black cursor-pointer">
+              <button
+                type="button"
+                onClick={() => imprimirRecibo(vendaFeita, nomeLoja, 'cupom')}
+                className="py-3 rounded-xl border-2 border-blue-900 text-blue-900 font-black cursor-pointer"
+              >
+                🧾 Cupom
+              </button>
+              <button type="button" onClick={novaVenda} className="col-span-2 py-3 rounded-xl bg-amber-400 text-slate-900 font-black cursor-pointer">
                 Nova venda
               </button>
             </div>
+            {vendaFeita.id && (
+              <div className="text-left">
+                <NotaFiscalVenda vendaId={vendaFeita.id} />
+              </div>
+            )}
           </div>
         </div>
       )}
