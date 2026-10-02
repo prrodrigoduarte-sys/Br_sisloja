@@ -64,7 +64,7 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
   const [itens, setItens] = useState<any[]>([]);
   const [receber, setReceber] = useState<any[]>([]);
   const [pagar, setPagar] = useState<any[]>([]);
-  const [estoque, setEstoque] = useState({ valor: 0, baixo: [] as { nome: string; saldo: number; minimo: number }[] });
+  const [estoque, setEstoque] = useState({ custo: 0, venda: 0, itens: 0, baixo: [] as { nome: string; saldo: number; minimo: number }[] });
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState('');
   const int = useMemo(() => intervalo(periodo), [periodo]);
@@ -76,7 +76,7 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
       const [cr, cp, pr, sa] = await Promise.all([
         buscarTodos(() => supabase.from('contas_receber').select('valor, vencimento').eq('codigo_loja', loja).eq('status', 'aberto').order('id')),
         buscarTodos(() => supabase.from('contas_pagar').select('valor, vencimento').eq('codigo_loja', loja).eq('status', 'aberto').order('id')),
-        buscarTodos(() => supabase.from('produtos').select('id, nome, custo, estoque_minimo, ativo, nao_listar_estoque').eq('ativo', true).order('id')),
+        buscarTodos(() => supabase.from('produtos').select('id, nome, custo, preco_venda, estoque_minimo, ativo, nao_listar_estoque').eq('ativo', true).order('id')),
         buscarTodos(() => supabase.from('estoque_saldos').select('produto_id, tipo, saldo').in('tipo', ['fisico', 'administrativo']).order('produto_id').order('tipo')),
       ]);
       setReceber(cr.data || []);
@@ -84,16 +84,21 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
       const fis: Record<string, number> = {};
       const adm: Record<string, number> = {};
       (sa.data || []).forEach((s: any) => ((s.tipo === 'fisico' ? fis : adm)[s.produto_id] = Number(s.saldo)));
-      let valor = 0;
+      let custo = 0;
+      let venda = 0;
+      let itens = 0;
       const baixo: { nome: string; saldo: number; minimo: number }[] = [];
       (pr.data || []).forEach((p: any) => {
         if (p.nao_listar_estoque) return;
-        valor += Math.max(adm[p.id] || 0, 0) * Number(p.custo || 0);
+        const q = Math.max(adm[p.id] || 0, 0);
+        custo += q * Number(p.custo || 0);
+        venda += q * Number(p.preco_venda || 0);
+        if (q > 0) itens++;
         const min = Number(p.estoque_minimo || 0);
         if (min > 0 && (fis[p.id] || 0) <= min) baixo.push({ nome: p.nome, saldo: fis[p.id] || 0, minimo: min });
       });
       baixo.sort((a, b) => a.saldo - a.minimo - (b.saldo - b.minimo));
-      setEstoque({ valor: r2(valor), baixo });
+      setEstoque({ custo: r2(custo), venda: r2(venda), itens, baixo });
     })();
   }, [loja]);
 
@@ -229,17 +234,26 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
       .map((t) => ({ rotulo: t.rotulo, valor: r2(t.valor), sub: `${t.qtd.toLocaleString('pt-BR', { maximumFractionDigits: 3 })} un · lucro ${brlCurto(r2(t.lucro))}` }));
   }, [itens]);
 
+  // a pagar e a receber: em dia × vencido (contas em aberto, posição de hoje)
   const fin = useMemo(() => {
     const hoje = iso(new Date());
     const em7 = new Date();
     em7.setDate(em7.getDate() + 7);
-    const s = (l: any[], f: (c: any) => boolean) => r2(l.filter(f).reduce((t, c) => t + Number(c.valor), 0));
-    return {
-      receberAberto: s(receber, () => true),
-      receberVencido: s(receber, (c) => c.vencimento < hoje),
-      pagar7: s(pagar, (c) => c.vencimento >= hoje && c.vencimento <= iso(em7)),
-      pagarVencido: s(pagar, (c) => c.vencimento < hoje),
+    const ate7 = iso(em7);
+    const resumo = (l: any[]) => {
+      const s = (f: (c: any) => boolean) => {
+        const x = l.filter(f);
+        return { qtd: x.length, total: r2(x.reduce((t, c) => t + Number(c.valor), 0)) };
+      };
+      return {
+        total: s(() => true),
+        emDia: s((c) => c.vencimento >= hoje),
+        vencido: s((c) => c.vencimento < hoje),
+        hoje: s((c) => c.vencimento === hoje),
+        prox7: s((c) => c.vencimento > hoje && c.vencimento <= ate7),
+      };
     };
+    return { receber: resumo(receber), pagar: resumo(pagar) };
   }, [receber, pagar]);
 
   const nomePeriodo = int.dias === 1 ? dataBR(int.de) : `${dataBR(int.de)} a ${dataBR(int.ate)}`;
@@ -273,13 +287,18 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Mini titulo="Taxas de cartão" valor={brl(k.taxa)} sub={k.fat ? `${pct((k.taxa / k.fat) * 100)} do faturamento` : ''} />
         <Mini titulo="Descontos dados" valor={brl(k.desconto)} />
-        <Mini titulo="A receber (em aberto)" valor={brl(fin.receberAberto)} sub={fin.receberVencido ? `⚠ ${brl(fin.receberVencido)} vencido` : 'nada vencido'} alerta={fin.receberVencido > 0} />
+        <Mini titulo="Estoque a preço de custo" valor={brl(estoque.custo)} sub={`${estoque.itens.toLocaleString('pt-BR')} produto(s) com saldo`} />
         <Mini
-          titulo="A pagar (7 dias)"
-          valor={brl(fin.pagar7)}
-          sub={fin.pagarVencido ? `⚠ ${brl(fin.pagarVencido)} vencido` : 'nada vencido'}
-          alerta={fin.pagarVencido > 0}
+          titulo="Estoque a preço de venda"
+          valor={brl(estoque.venda)}
+          sub={estoque.custo > 0 ? `lucro potencial ${brl(r2(estoque.venda - estoque.custo))} (${pct(((estoque.venda - estoque.custo) / estoque.custo) * 100)} sobre o custo)` : ''}
         />
+      </div>
+
+      {/* financeiro em aberto: em dia × vencido */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <PainelConta titulo="📥 A receber" r={fin.receber} />
+        <PainelConta titulo="📤 A pagar" r={fin.pagar} />
       </div>
 
       {/* gráfico principal */}
@@ -303,9 +322,17 @@ function Painel({ loggedUser }: { loggedUser: Usuario }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Cartao titulo="Estoque">
-          <p className="text-sm text-gray-600">
-            Valor do estoque (administrativo, a custo): <b className="text-gray-900">{brl(estoque.valor)}</b>
-          </p>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="rounded-lg bg-gray-50 p-2.5">
+              <div className="text-[11px] uppercase text-gray-500">A preço de custo</div>
+              <div className="text-lg font-bold text-gray-900">{brl(estoque.custo)}</div>
+            </div>
+            <div className="rounded-lg bg-gray-50 p-2.5">
+              <div className="text-[11px] uppercase text-gray-500">A preço de venda</div>
+              <div className="text-lg font-bold text-gray-900">{brl(estoque.venda)}</div>
+            </div>
+          </div>
+          <p className="mt-1 text-[11px] text-gray-500">Estoque administrativo × custo do cadastro e × preço padrão de venda.</p>
           <p className="mt-3 mb-1 text-xs font-bold uppercase text-gray-500">Abaixo do mínimo ({estoque.baixo.length})</p>
           {estoque.baixo.length === 0 ? (
             <p className="text-sm text-gray-500">✓ Nenhum produto abaixo do estoque mínimo.</p>
@@ -386,6 +413,51 @@ function Mini({ titulo, valor, sub, alerta }: { titulo: string; valor: string; s
       <div className="text-lg font-bold text-gray-900">{valor}</div>
       {sub && <div className={`text-[11px] ${alerta ? 'font-semibold text-red-700' : 'text-gray-500'}`}>{sub}</div>}
     </div>
+  );
+}
+
+// a pagar / a receber: total em aberto, em dia (destaque) e em atraso
+type Parte = { qtd: number; total: number };
+function PainelConta({ titulo, r }: { titulo: string; r: { total: Parte; emDia: Parte; vencido: Parte; hoje: Parte; prox7: Parte } }) {
+  const semAtraso = r.vencido.qtd === 0;
+  const pctDia = r.total.total > 0 ? (r.emDia.total / r.total.total) * 100 : 100;
+  return (
+    <section className={`rounded-xl bg-white p-4 shadow-sm border-l-4 ${semAtraso ? 'border-green-600' : 'border-red-600'}`}>
+      <div className="flex items-baseline justify-between gap-2">
+        <h3 className="font-bold text-gray-800">{titulo}</h3>
+        <span className="text-xs text-gray-500">{r.total.qtd} conta(s) em aberto</span>
+      </div>
+      <div className="text-2xl font-black text-gray-900">{brl(r.total.total)}</div>
+
+      {semAtraso ? (
+        <p className="mt-2 rounded-lg bg-green-50 px-3 py-2 text-sm font-bold text-green-800">✓ Nenhuma conta em atraso — tudo em dia</p>
+      ) : (
+        <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-bold text-red-800">
+          ⚠ {r.vencido.qtd} conta(s) em atraso: {brl(r.vencido.total)}
+        </p>
+      )}
+
+      {/* barra: parte em dia × parte vencida */}
+      {r.total.total > 0 && (
+        <div className="mt-3">
+          <div className="flex h-2.5 gap-[2px] overflow-hidden rounded">
+            <div style={{ width: `${pctDia}%`, background: '#0ca30c' }} />
+            {!semAtraso && <div style={{ width: `${100 - pctDia}%`, background: '#d03b3b' }} />}
+          </div>
+          <div className="mt-1 flex justify-between text-[11px] text-gray-600">
+            <span>✓ Em dia {brl(r.emDia.total)} ({pct(pctDia)})</span>
+            {!semAtraso && <span>⚠ Vencido {brl(r.vencido.total)}</span>}
+          </div>
+        </div>
+      )}
+
+      <dl className="mt-3 grid grid-cols-2 gap-y-1 text-sm">
+        <dt className="text-gray-600">Vence hoje</dt>
+        <dd className="text-right font-semibold">{r.hoje.qtd ? `${brl(r.hoje.total)} (${r.hoje.qtd})` : '—'}</dd>
+        <dt className="text-gray-600">Próximos 7 dias</dt>
+        <dd className="text-right font-semibold">{r.prox7.qtd ? `${brl(r.prox7.total)} (${r.prox7.qtd})` : '—'}</dd>
+      </dl>
+    </section>
   );
 }
 
