@@ -27,7 +27,7 @@ const STATUS: Record<string, { rotulo: string; cor: string }> = {
 };
 const destVazio = { cpf_cnpj: '', nome: '', ie: '', logradouro: '', numero: '', bairro: '', municipio: '', uf: '', cep: '', email: '', telefone: '' };
 
-async function chamar(corpo: Record<string, unknown>): Promise<{ ok: boolean; nota?: Nota; erro?: string }> {
+export async function chamar(corpo: Record<string, unknown>): Promise<{ ok: boolean; nota?: Nota; erro?: string }> {
   const { data, error } = await supabase.functions.invoke('nota-fiscal', { body: corpo });
   if (error) {
     return {
