@@ -1,6 +1,7 @@
 // BR Sisloja - Fase 3 - Financeiro: Contas a Pagar, Contas a Receber e Caixa na mesma aba
 import React, { useState } from 'react';
 import ContasPagarModule from './ContasPagarModule';
+import ContasReceberModule from './ContasReceberModule';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 type Sub = 'pagar' | 'receber' | 'caixa';
@@ -29,7 +30,7 @@ export default function FinanceiroModule({ loggedUser }: { loggedUser: Usuario }
         ))}
       </div>
       {sub === 'pagar' && <ContasPagarModule loggedUser={loggedUser} />}
-      {sub === 'receber' && <EmBreve texto="Contas a Receber" />}
+      {sub === 'receber' && <ContasReceberModule loggedUser={loggedUser} />}
       {sub === 'caixa' && <EmBreve texto="Caixa" />}
     </div>
   );
