@@ -1,0 +1,62 @@
+BR SISLOJA — NOTA FISCAL (NFC-e e NF-e) PELA FOCUS NFe
+=====================================================
+
+Como funciona
+-------------
+- No PDV, depois de finalizar a venda (ou em 🧾 Vendas, abrindo uma venda), aparece o quadro "📄 Nota fiscal":
+    Emitir NFC-e  -> cupom fiscal do consumidor (CPF na nota é opcional)
+    Emitir NF-e   -> nota modelo 55, pede CPF/CNPJ e endereço do cliente
+  Autorizada, o DANFE abre para imprimir. Também dá para baixar o XML e cancelar a nota.
+- Nota autorizada baixa o ESTOQUE FISCAL; nota cancelada devolve.
+- Venda com nota autorizada só pode ser cancelada depois de cancelar a nota.
+- Quem fala com a SEFAZ é a Focus NFe. O token dela fica guardado no Supabase (nunca no navegador).
+
+PASSO 1 — Focus NFe (focusnfe.com.br)
+-------------------------------------
+1. Crie a conta e, no painel, cadastre a EMPRESA: CNPJ, inscrição estadual, endereço completo,
+   regime tributário = Simples Nacional.
+2. Envie o CERTIFICADO DIGITAL A1 (arquivo .pfx) e a senha dele.
+3. Habilite NFC-e e NF-e. Para a NFC-e informe o CSC e o ID do CSC (gerados no site da SEFAZ do seu estado),
+   tanto de homologação quanto de produção.
+4. Confira a série e o próximo número de cada nota (se a loja já emitia nota em outro sistema,
+   continue a numeração de onde parou).
+5. Copie o TOKEN de HOMOLOGAÇÃO (para testar primeiro).
+
+PASSO 2 — Banco (SQL Editor do Supabase)
+----------------------------------------
+1. Rode de novo o fase7_cancelar_venda.sql (agora ele confere a nota fiscal).
+2. Rode o fase8_nota_fiscal.sql.
+3. Rode, com os dados da loja:
+     update public.lojas set cnpj = 'SÓ OS NÚMEROS DO CNPJ', uf = 'SIGLA DO ESTADO';
+
+PASSO 3 — Publicar a função (painel do Supabase)
+------------------------------------------------
+1. Edge Functions -> Deploy a new function -> Via Editor.
+2. Nome: nota-fiscal   (exatamente assim)
+3. Apague o exemplo e cole todo o conteúdo do arquivo supabase/functions/nota-fiscal/index.ts. Deploy.
+4. Edge Functions -> Secrets -> adicione:
+     FOCUS_TOKEN     = o token da Focus
+     FOCUS_AMBIENTE  = homologacao
+   (Quem usa o Supabase CLI pode fazer o mesmo com:
+     supabase functions deploy nota-fiscal
+     supabase secrets set FOCUS_TOKEN=... FOCUS_AMBIENTE=homologacao)
+
+PASSO 4 — Testar em homologação
+-------------------------------
+Faça uma venda e emita a NFC-e e a NF-e. Em homologação a nota não tem valor fiscal: o 1º item e o
+destinatário saem com o texto "EMITIDA EM AMBIENTE DE HOMOLOGACAO", como a SEFAZ exige.
+Se der "Recusada", a mensagem da SEFAZ aparece embaixo da nota: corrija (geralmente NCM, CFOP ou CSOSN) e emita de novo.
+
+PASSO 5 — Valendo (produção)
+----------------------------
+Troque os segredos: FOCUS_TOKEN = token de PRODUÇÃO e FOCUS_AMBIENTE = producao.
+
+Cadastro dos produtos (Produtos -> Editar -> Dados fiscais) — confira com o contador
+-------------------------------------------------------------------------------------
+- NCM: obrigatório (8 números). Sem NCM a nota não sai e o sistema diz quais produtos faltam.
+- CSOSN: 102 (padrão do Simples) ou 500 (mercadoria com ICMS-ST já recolhido). Vazio = 102.
+- CFOP: 5102 (revenda) ou 5405 (com ST). Com CSOSN 500 e CFOP 5102, o sistema usa 5405 sozinho.
+  NF-e para outro estado troca 5xxx por 6xxx automaticamente.
+- Origem: 0 (nacional), 1 ou 2 (importado)...
+- PIS/COFINS: CST 49 para todos (padrão do Simples). Se o contador pedir outro, mude em
+  lojas.nf_pis_cst e lojas.nf_cofins_cst.
