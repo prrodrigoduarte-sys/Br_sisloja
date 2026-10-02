@@ -336,7 +336,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-black text-slate-800">📦 Produtos & Estoque</h2>
-          <p className="text-xs text-slate-500">Valor do estoque (administrativo, a custo): <strong>{moeda(valorEstoque)}</strong></p>
+          <p className="text-xs text-slate-500">Valor do estoque (administrativo, a custo): <Oculto texto={moeda(valorEstoque)} mascara="R$ ••••" /></p>
         </div>
         <div className="flex flex-wrap gap-2">
           {podeCadastrar && (
@@ -397,6 +397,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               <th className="p-2 text-right" title="Clique no valor para ver o custo">
                 Custo
               </th>
+              <th className="p-2 text-right" title="Clique no valor para ver o preço padrão">Preço padrão</th>
               {tabelas.map((t) => (
                 <th key={t.id} className="p-2 text-right">
                   {t.nome}
@@ -436,6 +437,9 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
                   <td className="p-2 text-right whitespace-nowrap">
                     <CustoOculto valor={p.custo} />
                   </td>
+                  <td className="p-2 text-right whitespace-nowrap">
+                    <Oculto texto={moeda(p.preco_venda || 0)} mascara="R$ ••••" />
+                  </td>
                   {tabelas.map((t) => {
                     const v = precosLista[`${t.id}|${p.id}`];
                     return (
@@ -466,7 +470,7 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
             })}
             {!carregando && filtrados.length === 0 && (
               <tr>
-                <td colSpan={6 + tabelas.length} className="p-6 text-center text-slate-500 text-sm">
+                <td colSpan={7 + tabelas.length} className="p-6 text-center text-slate-500 text-sm">
                   Nenhum produto.
                 </td>
               </tr>
