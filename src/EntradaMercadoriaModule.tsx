@@ -1380,3 +1380,158 @@ function BuscaProduto({
     </div>
   );
 }
+
+// =====================================================================
+// IMOBILIZADO (patrimônio da loja: displays, balcões, móveis e equipamentos que vieram em nota)
+// =====================================================================
+function Patrimonio({ podeEditar }: { podeEditar: boolean }) {
+  const [lista, setLista] = useState<any[]>([]);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+  const [novo, setNovo] = useState<{ descricao: string; quantidade: string; valor: string; data_aquisicao: string; fornecedor: string; localizacao: string } | null>(null);
+
+  const carregar = async () => {
+    setCarregando(true);
+    const { data, error } = await supabase.from('patrimonio').select('*').order('data_aquisicao', { ascending: false }).limit(1000);
+    setCarregando(false);
+    if (error) return setErro(error.message.includes('patrimonio') ? 'Falta atualizar o banco: rode o arquivo fase12_imobilizado.sql no SQL Editor do Supabase.' : error.message);
+    setErro('');
+    setLista(data || []);
+  };
+
+  useEffect(() => {
+    carregar();
+  }, []);
+
+  const salvar = async () => {
+    if (!novo) return;
+    if (novo.descricao.trim().length < 2) return setErro('Informe a descrição do bem.');
+    const { error } = await supabase.from('patrimonio').insert({
+      descricao: novo.descricao.trim(),
+      quantidade: numInput(novo.quantidade) || 1,
+      valor: numInput(novo.valor),
+      data_aquisicao: novo.data_aquisicao,
+      fornecedor: novo.fornecedor.trim() || null,
+      localizacao: novo.localizacao.trim() || null,
+    });
+    if (error) return setErro(error.message);
+    setNovo(null);
+    carregar();
+  };
+
+  const excluir = async (p: any) => {
+    if (p.nota_id) return setErro('Este bem veio de uma nota fiscal: ele sai daqui se a nota for excluída.');
+    if (!window.confirm(`Tirar "${p.descricao}" do patrimônio?`)) return;
+    const { error } = await supabase.from('patrimonio').delete().eq('id', p.id);
+    if (error) return setErro(error.message);
+    carregar();
+  };
+
+  const total = lista.reduce((s, p) => s + Number(p.valor || 0), 0);
+  const campo = 'w-full rounded border border-gray-300 px-2 py-1 text-sm';
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-xl bg-white p-4 shadow-sm">
+        <div className="mr-auto">
+          <div className="text-xs uppercase text-gray-500">Patrimônio da loja (imobilizado)</div>
+          <div className="text-xl font-bold text-gray-800">{brl(total)}</div>
+          <div className="text-xs text-gray-500">{lista.length} bem(ns) · displays, balcões, móveis e equipamentos. Não é mercadoria: não entra no estoque nem no PDV.</div>
+        </div>
+        {podeEditar && !novo && (
+          <button
+            onClick={() => setNovo({ descricao: '', quantidade: '1', valor: '', data_aquisicao: new Date().toLocaleDateString('sv-SE'), fornecedor: '', localizacao: '' })}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+          >
+            + Lançar bem
+          </button>
+        )}
+      </div>
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      {novo && (
+        <div className="grid gap-2 rounded-xl bg-white p-4 shadow-sm sm:grid-cols-6">
+          <label className="sm:col-span-3 text-xs text-gray-500">
+            Descrição *
+            <input className={campo} value={novo.descricao} onChange={(e) => setNovo({ ...novo, descricao: e.target.value })} />
+          </label>
+          <label className="text-xs text-gray-500">
+            Qtd
+            <input className={campo} inputMode="decimal" value={novo.quantidade} onChange={(e) => setNovo({ ...novo, quantidade: e.target.value })} />
+          </label>
+          <label className="sm:col-span-2 text-xs text-gray-500">
+            Valor pago (R$)
+            <input className={campo} inputMode="decimal" value={novo.valor} onChange={(e) => setNovo({ ...novo, valor: e.target.value })} />
+          </label>
+          <label className="sm:col-span-2 text-xs text-gray-500">
+            Data de aquisição
+            <input type="date" className={campo} value={novo.data_aquisicao} onChange={(e) => setNovo({ ...novo, data_aquisicao: e.target.value })} />
+          </label>
+          <label className="sm:col-span-2 text-xs text-gray-500">
+            Fornecedor
+            <input className={campo} value={novo.fornecedor} onChange={(e) => setNovo({ ...novo, fornecedor: e.target.value })} />
+          </label>
+          <label className="sm:col-span-2 text-xs text-gray-500">
+            Onde está (setor)
+            <input className={campo} value={novo.localizacao} onChange={(e) => setNovo({ ...novo, localizacao: e.target.value })} />
+          </label>
+          <div className="flex justify-end gap-2 sm:col-span-6">
+            <button onClick={() => setNovo(null)} className="rounded-lg border px-3 py-1.5 text-sm">
+              Voltar
+            </button>
+            <button onClick={salvar} className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white">
+              Salvar
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+        {carregando ? (
+          <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>
+        ) : !lista.length ? (
+          <p className="p-6 text-center text-sm text-gray-500">
+            Nenhum bem lançado. Na conferência da nota, marque <b>🪑 Imobilizado</b> nos itens que são móveis/equipamentos da loja.
+          </p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b bg-gray-50 text-left text-[11px] uppercase text-gray-600">
+              <tr>
+                <th className="p-2">Bem</th>
+                <th className="p-2 text-right">Qtd</th>
+                <th className="p-2 text-right">Valor</th>
+                <th className="p-2">Aquisição</th>
+                <th className="p-2">Origem</th>
+                <th className="p-2" />
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {lista.map((p) => (
+                <tr key={p.id}>
+                  <td className="p-2">
+                    <div className="font-medium text-gray-800">{p.descricao}</div>
+                    {p.localizacao && <div className="text-[11px] text-gray-500">{p.localizacao}</div>}
+                  </td>
+                  <td className="p-2 text-right">{n4(Number(p.quantidade))}</td>
+                  <td className="p-2 text-right font-semibold">{brl(Number(p.valor))}</td>
+                  <td className="p-2">{dataBR(p.data_aquisicao)}</td>
+                  <td className="p-2 text-xs text-gray-600">
+                    {p.nota_numero ? `NF ${p.nota_numero}` : 'lançado à mão'}
+                    {p.fornecedor ? ` · ${p.fornecedor}` : ''}
+                  </td>
+                  <td className="p-2 text-right">
+                    {podeEditar && !p.nota_id && (
+                      <button onClick={() => excluir(p)} className="text-xs text-red-600 hover:underline">
+                        excluir
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
