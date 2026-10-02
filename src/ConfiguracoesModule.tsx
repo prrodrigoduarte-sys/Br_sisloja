@@ -89,7 +89,7 @@ function diferencas(r: Registro) {
 
 export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuario }) {
   const ehAdmin = (loggedUser?.perfil || '').toLowerCase() === 'admin';
-  const [sub, setSub] = useState<'registro' | 'ajustes' | 'usuarios'>('registro');
+  const [sub, setSub] = useState<'registro' | 'ajustes' | 'usuarios' | 'taxas'>('registro');
   if (!ehAdmin) return <p className="p-6 text-center text-sm text-gray-500">Somente o administrador acessa as Configurações.</p>;
 
   return (
@@ -101,6 +101,7 @@ export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuari
             ['registro', '📜 Registro de atividades'],
             ['ajustes', '📦 Ajustes de estoque'],
             ['usuarios', '👥 Usuários'],
+            ['taxas', '💳 Taxas de cartão'],
           ] as const
         ).map(([id, rot]) => (
           <button
@@ -115,6 +116,95 @@ export default function ConfiguracoesModule({ loggedUser }: { loggedUser: Usuari
       {sub === 'registro' && <RegistroAtividades loggedUser={loggedUser} />}
       {sub === 'ajustes' && <AjustesEstoque loggedUser={loggedUser} />}
       {sub === 'usuarios' && <Usuarios loggedUser={loggedUser} />}
+      {sub === 'taxas' && <TaxasCartao />}
+    </div>
+  );
+}
+
+// =====================================================================
+// TAXAS DE CARTÃO (% da maquininha): descontadas do lucro de cada venda
+// =====================================================================
+const LINHAS_TAXA: { forma: string; parcelas: number; rotulo: string }[] = [
+  { forma: 'cartao_debito', parcelas: 1, rotulo: 'Débito' },
+  ...Array.from({ length: 10 }, (_, i) => ({ forma: 'cartao_credito', parcelas: i + 1, rotulo: i === 0 ? 'Crédito à vista (1x)' : `Crédito ${i + 1}x` })),
+];
+const chaveTaxa = (forma: string, parcelas: number) => `${forma}|${parcelas}`;
+
+function TaxasCartao() {
+  const [valores, setValores] = useState<Record<string, string>>({});
+  const [carregando, setCarregando] = useState(true);
+  const [salvando, setSalvando] = useState(false);
+  const [msg, setMsg] = useState<{ tipo: 'ok' | 'erro'; texto: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from('taxas_cartao').select('forma, parcelas, taxa');
+      setCarregando(false);
+      if (error) {
+        setMsg({
+          tipo: 'erro',
+          texto: error.message.includes('taxas_cartao') ? 'Falta atualizar o banco: rode o arquivo fase6_taxas_cartao.sql no SQL Editor do Supabase.' : 'Erro: ' + error.message,
+        });
+        return;
+      }
+      const v: Record<string, string> = {};
+      ((data as any[]) || []).forEach((x) => (v[chaveTaxa(x.forma, x.parcelas)] = String(x.taxa).replace('.', ',')));
+      setValores(v);
+    })();
+  }, []);
+
+  const salvar = async () => {
+    const taxas = LINHAS_TAXA.map((l) => ({ ...l, taxa: Number((valores[chaveTaxa(l.forma, l.parcelas)] || '0').replace(',', '.')) }));
+    const ruim = taxas.find((t) => !isFinite(t.taxa) || t.taxa < 0 || t.taxa >= 100);
+    if (ruim) return setMsg({ tipo: 'erro', texto: `Taxa inválida em "${ruim.rotulo}".` });
+    setSalvando(true);
+    setMsg(null);
+    const { error } = await supabase.rpc('salvar_taxas_cartao', { p_taxas: taxas.map(({ forma, parcelas, taxa }) => ({ forma, parcelas, taxa })) });
+    setSalvando(false);
+    setMsg(error ? { tipo: 'erro', texto: error.message } : { tipo: 'ok', texto: 'Taxas salvas. Valem para as próximas vendas.' });
+  };
+
+  if (carregando) return <p className="p-6 text-center text-sm text-gray-500">Carregando…</p>;
+
+  return (
+    <div className="max-w-md space-y-3">
+      {msg && <p className={`rounded-lg p-3 text-sm ${msg.tipo === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>{msg.texto}</p>}
+      <div className="rounded-xl bg-blue-50 p-4 text-sm text-blue-900">
+        Informe a taxa que a maquininha cobra (% sobre o valor da venda). O preço para o cliente não muda: a taxa é descontada do lucro da venda e
+        do valor que entra no Contas a receber. Deixe 0 se não houver taxa.
+      </div>
+      <div className="overflow-hidden rounded-xl bg-white shadow-sm">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
+            <tr>
+              <th className="p-2">Forma</th>
+              <th className="p-2 text-right">Taxa (%)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {LINHAS_TAXA.map((l) => {
+              const k = chaveTaxa(l.forma, l.parcelas);
+              return (
+                <tr key={k} className="border-t">
+                  <td className="p-2 text-gray-800">{l.rotulo}</td>
+                  <td className="p-2 text-right">
+                    <input
+                      value={valores[k] ?? ''}
+                      onChange={(e) => setValores((v) => ({ ...v, [k]: e.target.value }))}
+                      inputMode="decimal"
+                      placeholder="0,00"
+                      className="w-24 rounded border px-2 py-1 text-right"
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={salvar} disabled={salvando} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">
+        {salvando ? 'Salvando…' : 'Salvar taxas'}
+      </button>
     </div>
   );
 }
