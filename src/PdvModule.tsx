@@ -3,6 +3,7 @@ import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
 import NotaFiscalVenda from './NotaFiscalVenda';
 import { SeletorCliente, type Cliente } from './ClienteVenda';
+import type { Orcamento } from './OrcamentoModule';
 
 // ------------------------------------------------------------
 // PDV (frente de caixa) — pensado para celular primeiro.
@@ -562,6 +563,8 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   const [erro, setErro] = useState('');
   const [aviso, setAviso] = useState('');
   const [vendaFeita, setVendaFeita] = useState<VendaFeita | null>(null);
+  const [orcamentos, setOrcamentos] = useState<Orcamento[]>([]); // prontos para carregar na venda
+  const [orcamentoAtual, setOrcamentoAtual] = useState<Orcamento | null>(null); // carregado no carrinho
   const buscaRef = useRef<HTMLInputElement>(null);
 
   const nomeLoja = loggedUser?.loja_nome || loggedUser?.codigo_loja || 'Loja';
@@ -598,6 +601,16 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
   useEffect(() => {
     carregar();
   }, [carregar]);
+
+  // orçamentos prontos (sem a tabela no banco, o quadro só não aparece)
+  const carregarOrcamentos = useCallback(async () => {
+    const { data } = await supabase.from('orcamentos').select('*').eq('status', 'pronto').order('created_at', { ascending: false }).limit(30);
+    setOrcamentos(((data as any[]) || []).map((o) => ({ ...o, total: Number(o.total), desconto: Number(o.desconto) })));
+  }, []);
+
+  useEffect(() => {
+    carregarOrcamentos();
+  }, [carregarOrcamentos]);
 
   // ---- preço pela tabela escolhida ----
   // preço do produto numa tabela ('' ou sem preço na tabela = preço padrão)
@@ -716,6 +729,35 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     if (!tratarCodigo(codigo)) setAviso(`Código ${codigo} não encontrado.`);
   };
 
+  // ---- orçamento pronto -> carrinho ----
+  const carregarOrcamento = async (o: Orcamento) => {
+    if (carrinho.length && !window.confirm(`Trocar os itens da venda atual pelos do orçamento nº ${o.numero}?`)) return;
+    const faltando: string[] = [];
+    const novos: ItemCarrinho[] = [];
+    o.itens.forEach((i) => {
+      const p = produtos.find((x) => x.id === i.produto_id);
+      if (!p) return faltando.push(i.nome);
+      // a tabela só vale se ainda existir; senão vai pelo preço padrão
+      novos.push({ produto: p, quantidade: Number(i.quantidade), tabelaId: i.tabela_id && tabelas.some((t) => t.id === i.tabela_id) ? i.tabela_id : '' });
+    });
+    setCarrinho(novos);
+    setTabelaId(o.tabela_id && tabelas.some((t) => t.id === o.tabela_id) ? o.tabela_id : '');
+    setDesconto(o.desconto ? String(o.desconto).replace('.', ',') : '');
+    setOrcamentoAtual(o);
+    setCliente(null);
+    if (o.cliente_id) {
+      const { data } = await supabase.rpc('obter_cliente', { p_id: o.cliente_id });
+      if (data) setCliente(data as Cliente);
+    }
+    // o preço da venda é o de hoje (o banco recalcula): avisa se mudou desde o orçamento
+    const hoje = novos.reduce((a, x) => a + Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100, 0) - (o.desconto || 0);
+    const avisos: string[] = [];
+    if (faltando.length) avisos.push(`Fora da venda (produto inativo ou excluído): ${faltando.join(', ')}.`);
+    if (!faltando.length && Math.abs(hoje - o.total) >= 0.01) avisos.push(`Os preços mudaram desde o orçamento: era ${moeda(o.total)}, hoje dá ${moeda(Math.max(hoje, 0))}.`);
+    setAviso(avisos.length ? `Orçamento nº ${o.numero} carregado. ${avisos.join(' ')}` : `Orçamento nº ${o.numero} carregado na venda.`);
+    setCarrinhoAberto(true);
+  };
+
   // ---- totais ----
   const subtotal = carrinho.reduce((a, x) => a + Math.round(precoTab(x.produto, x.tabelaId) * x.quantidade * 100) / 100, 0);
   const valorDesconto = Math.min(Math.max(num(desconto) || 0, 0), subtotal);
@@ -753,6 +795,11 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       return;
     }
     const r: any = data;
+    if (orcamentoAtual) {
+      await supabase.from('orcamentos').update({ status: 'convertido', venda_id: r.id || null, venda_numero: Number(r.numero) || null }).eq('id', orcamentoAtual.id);
+      setOrcamentoAtual(null);
+      carregarOrcamentos();
+    }
     setVendaFeita({
       id: r.id,
       cliente: cliente?.nome || null,
@@ -783,7 +830,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
     setParcelas(1);
     setCliente(null);
     setCarrinhoAberto(false);
-  }, [salvando, carrinho, forma, parcelas, cliente, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab]);
+  }, [salvando, carrinho, forma, parcelas, cliente, valorRecebido, total, valorDesconto, tabelaId, operador, precoTab, orcamentoAtual, carregarOrcamentos]);
 
   // atalho F10
   useEffect(() => {
@@ -905,6 +952,31 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
         {aviso && <div className="text-xs font-semibold bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">{aviso}</div>}
         {erro && <div className="text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800 rounded-lg px-3 py-2">{erro}</div>}
 
+        {orcamentos.length > 0 && (
+          <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-2">
+            <p className="mb-1.5 text-[11px] font-black text-emerald-900">📝 Orçamentos prontos: toque para carregar na venda</p>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {orcamentos.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => carregarOrcamento(o)}
+                  className={`shrink-0 rounded-lg px-3 py-2 text-left text-xs cursor-pointer border ${
+                    orcamentoAtual?.id === o.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-800 border-emerald-200 hover:border-emerald-500'
+                  }`}
+                >
+                  <span className="block font-black">
+                    Nº {o.numero} · {moeda(o.total)}
+                  </span>
+                  <span className={`block text-[11px] ${orcamentoAtual?.id === o.id ? 'text-emerald-100' : 'text-slate-500'}`}>
+                    {o.cliente_nome || 'sem cliente'} · {o.itens.length} item(ns)
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="flex-1 lg:overflow-y-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 gap-2 content-start">
           {carregando && <p className="col-span-full text-center text-sm text-slate-500 py-8">Carregando produtos...</p>}
           {!carregando && filtrados.length === 0 && (
@@ -954,7 +1026,17 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
         className={`${carrinhoAberto ? 'flex' : 'hidden'} lg:flex fixed lg:static inset-x-0 bottom-0 top-12 lg:top-auto z-30 lg:z-auto lg:w-[380px] xl:w-[420px] shrink-0 bg-white lg:rounded-2xl rounded-t-2xl shadow-2xl lg:shadow-sm border border-slate-200 flex-col p-3 sm:p-4 gap-3 lg:min-h-0`}
       >
         <div className="flex items-center justify-between">
-          <h3 className="font-black text-sm text-slate-800">Venda atual</h3>
+          <h3 className="font-black text-sm text-slate-800">
+            Venda atual
+            {orcamentoAtual && (
+              <span className="ml-2 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">
+                orçamento nº {orcamentoAtual.numero}
+                <button type="button" onClick={() => setOrcamentoAtual(null)} className="ml-1 cursor-pointer" title="Desligar do orçamento (os itens continuam)">
+                  ✕
+                </button>
+              </span>
+            )}
+          </h3>
           <button type="button" onClick={() => setCarrinhoAberto(false)} className="lg:hidden text-slate-500 font-bold text-xl px-2 cursor-pointer" aria-label="Fechar carrinho">
             ✕
           </button>
