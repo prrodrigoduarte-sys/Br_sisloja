@@ -52,6 +52,7 @@ const ACOES: Record<string, { rotulo: string; cor: string }> = {
   alteracao: { rotulo: 'Alterou', cor: 'bg-blue-100 text-blue-800' },
   exclusao: { rotulo: 'Excluiu', cor: 'bg-red-100 text-red-800' },
   exclusao_nota_entrada: { rotulo: 'Excluiu nota de entrada', cor: 'bg-red-600 text-white' },
+  cancelamento_venda: { rotulo: 'Cancelou venda', cor: 'bg-red-600 text-white' },
 };
 
 export const PERFIS: { id: string; rotulo: string; pode: string }[] = [
