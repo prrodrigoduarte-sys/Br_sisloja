@@ -9,8 +9,9 @@ import ConfiguracoesModule from './ConfiguracoesModule';
 import RelatoriosModule from './RelatoriosModule';
 import NotasFiscaisModule from './NotasFiscaisModule';
 import DashboardModule from './DashboardModule';
+import CotacaoModule from './CotacaoModule';
 
-type Aba = 'dashboard' | 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'financeiro' | 'notas' | 'relatorios' | 'configuracoes';
+type Aba = 'dashboard' | 'pdv' | 'produtos' | 'entrada' | 'fornecedores' | 'cotacao' | 'financeiro' | 'notas' | 'relatorios' | 'configuracoes';
 
 type Usuario = {
   id: string;
@@ -28,6 +29,7 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'produtos', rotulo: 'Produtos & Estoque', icone: '📦' },
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
   { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
+  { id: 'cotacao', rotulo: 'Cotação', icone: '💲' },
   { id: 'financeiro', rotulo: 'Financeiro', icone: '💰' },
   { id: 'notas', rotulo: 'Nota Fiscal', icone: '📄' },
   { id: 'relatorios', rotulo: 'Relatórios', icone: '📊' },
@@ -40,6 +42,7 @@ const PERFIS_ABA: Partial<Record<Aba, string[]>> = {
   produtos: ['admin', 'gerente', 'estoquista', 'financeiro'],
   entrada: ['admin', 'gerente', 'estoquista'],
   fornecedores: ['admin', 'gerente', 'estoquista', 'financeiro'],
+  cotacao: ['admin', 'gerente', 'estoquista', 'financeiro'],
   financeiro: ['admin', 'gerente', 'financeiro'],
   notas: ['admin', 'gerente', 'financeiro'],
   relatorios: ['admin', 'gerente', 'financeiro'],
@@ -238,6 +241,7 @@ export default function App() {
         {aba === 'produtos' && <ProdutosEstoqueModule loggedUser={usuario} />}
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
         {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
+        {aba === 'cotacao' && <CotacaoModule loggedUser={usuario} />}
         {aba === 'financeiro' && <FinanceiroModule loggedUser={usuario} />}
         {aba === 'notas' && <NotasFiscaisModule loggedUser={usuario} />}
         {aba === 'relatorios' && <RelatoriosModule loggedUser={usuario} />}
