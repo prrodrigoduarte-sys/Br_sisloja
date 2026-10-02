@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { supabase } from './supabase';
 import { buscarTodos } from './buscarTodos';
 import AjustePrecosModule from './AjustePrecosModule';
@@ -614,8 +615,8 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
         </table>
       </div>
 
-      {/* ===== Modal produto ===== */}
-      {modalProduto && (
+      {/* ===== Modal produto ===== (no body, para abrir sempre no meio da tela, mesmo com a lista comprida) */}
+      {modalProduto && createPortal(
         <div className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <form onSubmit={salvarProduto} className="bg-white w-full sm:max-w-2xl max-h-[92dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-4 sm:p-6 space-y-4">
             <div className="flex items-center justify-between">
@@ -793,11 +794,12 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               </button>
             </div>
           </form>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ===== Modal movimento ===== */}
-      {movProduto && (
+      {movProduto && createPortal(
         <div className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <form onSubmit={salvarMov} className="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-4 sm:p-6 space-y-3">
             <div className="flex items-center justify-between">
@@ -851,7 +853,8 @@ export default function ProdutosEstoqueModule({ loggedUser }: { loggedUser: any 
               </button>
             </div>
           </form>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
