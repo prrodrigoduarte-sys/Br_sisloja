@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import ContasPagarModule from './ContasPagarModule';
 import ContasReceberModule from './ContasReceberModule';
+import CaixaModule from './CaixaModule';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 type Sub = 'pagar' | 'receber' | 'caixa';
@@ -9,7 +10,7 @@ type Sub = 'pagar' | 'receber' | 'caixa';
 const SUBS: { id: Sub; rotulo: string }[] = [
   { id: 'pagar', rotulo: '📤 Contas a Pagar' },
   { id: 'receber', rotulo: '📥 Contas a Receber' },
-  { id: 'caixa', rotulo: '💵 Caixa' },
+  { id: 'caixa', rotulo: '🏦 Contas & Caixa' },
 ];
 
 export default function FinanceiroModule({ loggedUser }: { loggedUser: Usuario }) {
@@ -31,11 +32,7 @@ export default function FinanceiroModule({ loggedUser }: { loggedUser: Usuario }
       </div>
       {sub === 'pagar' && <ContasPagarModule loggedUser={loggedUser} />}
       {sub === 'receber' && <ContasReceberModule loggedUser={loggedUser} />}
-      {sub === 'caixa' && <EmBreve texto="Caixa" />}
+      {sub === 'caixa' && <CaixaModule loggedUser={loggedUser} />}
     </div>
   );
-}
-
-function EmBreve({ texto }: { texto: string }) {
-  return <div className="rounded-xl bg-white p-8 text-center text-sm text-gray-500 shadow-sm">{texto}: em construção.</div>;
 }
