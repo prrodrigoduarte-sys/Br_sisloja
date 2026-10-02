@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { supabase } from './supabase';
-import PdvModule from './PdvModule';
+import VendasModule from './VendasModule';
 import ProdutosEstoqueModule from './ProdutosEstoqueModule';
 import FornecedoresModule from './FornecedoresModule';
 import EntradaMercadoriaModule from './EntradaMercadoriaModule';
@@ -25,7 +25,7 @@ type Usuario = {
 
 const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'dashboard', rotulo: 'Dashboard', icone: '📈' },
-  { id: 'pdv', rotulo: 'PDV', icone: '🛒' },
+  { id: 'pdv', rotulo: 'Vendas', icone: '🛒' },
   { id: 'produtos', rotulo: 'Produtos & Estoque', icone: '📦' },
   { id: 'entrada', rotulo: 'Entrada de Mercadoria', icone: '📥' },
   { id: 'fornecedores', rotulo: 'Fornecedores', icone: '🚚' },
@@ -223,7 +223,7 @@ export default function App() {
       <style>{`
         @keyframes sl-entra { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
         @keyframes sl-marca { 0% { opacity: 0; } 25% { opacity: 1; } 100% { opacity: 0; } }
-        .sl-entra { animation: sl-entra .45s ease-out both; }
+        .sl-entra { animation: sl-entra .45s ease-out backwards; }
         .sl-marca { animation: sl-marca .9s ease-in-out both; }
         @media (prefers-reduced-motion: reduce) { .sl-entra, .sl-marca { animation: none; } .sl-marca { display: none; } }
         @media print { .sl-fundo, .sl-marca { display: none; } }
@@ -237,7 +237,7 @@ export default function App() {
 
       <main key={aba} className="sl-entra relative z-10 p-4">
         {aba === 'dashboard' && <DashboardModule loggedUser={usuario} />}
-        {aba === 'pdv' && <PdvModule loggedUser={usuario} />}
+        {aba === 'pdv' && <VendasModule loggedUser={usuario} />}
         {aba === 'produtos' && <ProdutosEstoqueModule loggedUser={usuario} />}
         {aba === 'entrada' && <EntradaMercadoriaModule loggedUser={usuario} />}
         {aba === 'fornecedores' && <FornecedoresModule loggedUser={usuario} />}
