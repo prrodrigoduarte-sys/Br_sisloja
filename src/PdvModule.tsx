@@ -208,6 +208,229 @@ ${v.forma === 'dinheiro' && v.recebido != null ? `<tr><td>Recebido</td><td style
   }, 250);
 }
 
+// ---------- Vendas do dia: ver itens, reimprimir e cancelar ----------
+const cancelada = (v: any) => !!v.cancelada_em || String(v.status || '').toLowerCase().startsWith('cancel');
+
+function VendasDoDia({ nomeLoja, aoFechar, aoCancelar }: { nomeLoja: string; aoFechar: () => void; aoCancelar: () => void }) {
+  const [dia, setDia] = useState(() => new Date().toLocaleDateString('sv-SE'));
+  const [vendas, setVendas] = useState<any[]>([]);
+  const [itens, setItens] = useState<Record<string, any[]>>({});
+  const [aberta, setAberta] = useState<string | null>(null);
+  const [cancelando, setCancelando] = useState<any | null>(null);
+  const [motivo, setMotivo] = useState('');
+  const [senha, setSenha] = useState('');
+  const [carregando, setCarregando] = useState(true);
+  const [ocupado, setOcupado] = useState(false);
+  const [msg, setMsg] = useState<{ tipo: 'ok' | 'erro'; texto: string } | null>(null);
+
+  const carregar = useCallback(async () => {
+    setCarregando(true);
+    const { data, error } = await buscarTodos(() =>
+      supabase
+        .from('vendas')
+        .select('*')
+        .gte('created_at', new Date(dia + 'T00:00:00').toISOString())
+        .lte('created_at', new Date(dia + 'T23:59:59.999').toISOString())
+        .order('created_at', { ascending: false })
+        .order('id')
+    );
+    setCarregando(false);
+    if (error) return setMsg({ tipo: 'erro', texto: 'Não consegui carregar as vendas: ' + error.message });
+    setVendas(data || []);
+  }, [dia]);
+
+  useEffect(() => {
+    carregar();
+  }, [carregar]);
+
+  const itensDe = async (id: string) => {
+    if (itens[id]) return itens[id];
+    const { data } = await supabase.from('venda_itens').select('nome, quantidade, preco_unitario, subtotal').eq('venda_id', id);
+    const l = (data as any[]) || [];
+    setItens((x) => ({ ...x, [id]: l }));
+    return l;
+  };
+
+  const abrir = async (v: any) => {
+    if (aberta === v.id) return setAberta(null);
+    setAberta(v.id);
+    await itensDe(v.id);
+  };
+
+  const reimprimir = async (v: any) => {
+    const l = await itensDe(v.id);
+    imprimirRecibo(
+      {
+        numero: Number(v.numero),
+        total: Number(v.total),
+        troco: Number(v.troco || 0),
+        forma: v.forma_pagamento,
+        parcelas: Number(v.parcelas || 1),
+        recebido: v.valor_recebido != null ? Number(v.valor_recebido) : null,
+        desconto: Number(v.desconto || 0),
+        itens: l.map((i) => ({ nome: i.nome, quantidade: Number(i.quantidade), preco: Number(i.preco_unitario), subtotal: Number(i.subtotal) })),
+        data: new Date(v.created_at).toLocaleString('pt-BR'),
+      },
+      nomeLoja
+    );
+  };
+
+  const confirmarCancelamento = async () => {
+    if (motivo.trim().length < 5) return setMsg({ tipo: 'erro', texto: 'Escreva o motivo do cancelamento.' });
+    if (!senha) return setMsg({ tipo: 'erro', texto: 'Digite a senha do administrador.' });
+    setOcupado(true);
+    setMsg(null);
+    const { error } = await supabase.rpc('cancelar_venda', { p_venda_id: cancelando.id, p_motivo: motivo.trim(), p_senha: senha });
+    setOcupado(false);
+    setSenha('');
+    if (error) {
+      return setMsg({
+        tipo: 'erro',
+        texto: error.message.includes('cancelar_venda') ? 'Falta atualizar o banco: rode o arquivo fase7_cancelar_venda.sql no SQL Editor do Supabase.' : error.message,
+      });
+    }
+    setMsg({ tipo: 'ok', texto: `Venda nº ${cancelando.numero} cancelada. Os produtos voltaram ao estoque e o Contas a receber foi cancelado.` });
+    setCancelando(null);
+    setMotivo('');
+    carregar();
+    aoCancelar();
+  };
+
+  const validas = vendas.filter((v) => !cancelada(v));
+  const totalDia = validas.reduce((s, v) => s + Number(v.total || 0), 0);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2 sm:p-4">
+      <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[92dvh] flex flex-col">
+        <div className="flex items-center gap-2 px-4 py-3 border-b">
+          <h3 className="font-black text-slate-800 mr-auto">🧾 Vendas</h3>
+          <input type="date" value={dia} onChange={(e) => setDia(e.target.value)} className="text-sm border border-slate-300 rounded-lg px-2 py-1" />
+          <button type="button" onClick={aoFechar} className="text-slate-500 font-bold text-xl px-2 cursor-pointer" aria-label="Fechar">
+            ✕
+          </button>
+        </div>
+        <div className="px-4 py-2 text-xs text-slate-600 border-b bg-slate-50">
+          {validas.length} venda(s) · <b>{moeda(totalDia)}</b>
+          {vendas.length > validas.length && <span className="text-rose-600"> · {vendas.length - validas.length} cancelada(s)</span>}
+        </div>
+        {msg && (
+          <p className={`mx-4 mt-3 rounded-lg px-3 py-2 text-xs font-semibold ${msg.tipo === 'ok' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>{msg.texto}</p>
+        )}
+
+        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+          {carregando && <p className="text-center text-sm text-slate-500 py-8">Carregando...</p>}
+          {!carregando && vendas.length === 0 && <p className="text-center text-sm text-slate-500 py-8">Nenhuma venda neste dia.</p>}
+          {vendas.map((v) => {
+            const cancel = cancelada(v);
+            const forma = (FORMAS.find((f) => f.id === v.forma_pagamento)?.rotulo || v.forma_pagamento) + (v.forma_pagamento === 'cartao_credito' && Number(v.parcelas) > 1 ? ` ${v.parcelas}x` : '');
+            return (
+              <div key={v.id} className={`rounded-xl border p-3 text-sm ${cancel ? 'border-rose-200 bg-rose-50/50' : 'border-slate-200'}`}>
+                <div className="flex items-center gap-2 cursor-pointer" onClick={() => abrir(v)}>
+                  <span className="text-slate-400">{aberta === v.id ? '▾' : '▸'}</span>
+                  <div className="min-w-0 mr-auto">
+                    <p className={`font-bold ${cancel ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                      Nº {v.numero} · {new Date(v.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                    <p className="text-[11px] text-slate-500 truncate">
+                      {forma}
+                      {v.operador ? ` · ${v.operador}` : ''}
+                    </p>
+                  </div>
+                  {cancel && <span className="rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-bold text-white">CANCELADA</span>}
+                  <span className={`font-black whitespace-nowrap ${cancel ? 'text-slate-400 line-through' : 'text-slate-900'}`}>{moeda(Number(v.total))}</span>
+                </div>
+
+                {aberta === v.id && (
+                  <div className="mt-2 border-t pt-2 text-xs">
+                    {(itens[v.id] || []).map((i, k) => (
+                      <div key={k} className="flex justify-between gap-2 py-0.5">
+                        <span className="text-slate-700">
+                          {Number(i.quantidade)} × {i.nome}
+                        </span>
+                        <span className="text-slate-600 whitespace-nowrap">{moeda(Number(i.subtotal))}</span>
+                      </div>
+                    ))}
+                    {Number(v.desconto) > 0 && <p className="text-slate-500">Desconto: {moeda(Number(v.desconto))}</p>}
+                    {cancel && (
+                      <p className="mt-1 text-rose-700">
+                        Cancelada {v.cancelada_em ? `em ${new Date(v.cancelada_em).toLocaleString('pt-BR')}` : ''}
+                        {v.cancelada_por ? ` por ${v.cancelada_por}` : ''}
+                        {v.motivo_cancelamento ? ` · motivo: ${v.motivo_cancelamento}` : ''}
+                      </p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <button type="button" onClick={() => reimprimir(v)} className="rounded-lg bg-blue-900 px-3 py-1.5 font-bold text-white cursor-pointer">
+                        🖨️ Reimprimir
+                      </button>
+                      {!cancel && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCancelando(v);
+                            setMsg(null);
+                          }}
+                          className="rounded-lg border border-rose-300 px-3 py-1.5 font-bold text-rose-700 cursor-pointer hover:bg-rose-50"
+                        >
+                          Cancelar venda
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {cancelando && (
+          <div className="border-t p-4 bg-rose-50 rounded-b-2xl">
+            <p className="font-black text-rose-800 text-sm">
+              Cancelar a venda nº {cancelando.numero} ({moeda(Number(cancelando.total))})?
+            </p>
+            <p className="text-[11px] text-rose-700 mt-0.5">
+              Os produtos voltam ao estoque e o lançamento no Contas a receber é cancelado. A venda continua no histórico, marcada como cancelada.
+            </p>
+            <input
+              value={motivo}
+              onChange={(e) => setMotivo(e.target.value)}
+              placeholder="Motivo (ex.: cliente desistiu, lançada errada)"
+              className="mt-2 w-full border border-rose-300 rounded-lg px-2 py-2 text-sm"
+            />
+            <input
+              type="password"
+              value={senha}
+              onChange={(e) => setSenha(e.target.value)}
+              placeholder="Senha do administrador"
+              autoComplete="off"
+              className="mt-2 w-full border border-rose-300 rounded-lg px-2 py-2 text-sm"
+            />
+            <div className="mt-2 flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setCancelando(null);
+                  setSenha('');
+                }}
+                className="rounded-lg border px-3 py-2 text-sm font-bold text-slate-600 bg-white cursor-pointer"
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                onClick={confirmarCancelamento}
+                disabled={ocupado}
+                className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-black text-white cursor-pointer disabled:opacity-50"
+              >
+                {ocupado ? 'Cancelando...' : 'Confirmar cancelamento'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Tela do PDV ----------
 // preços de cada tabela (Padrão, Varejo, Atacado...): tocar numa etiqueta põe o item no carrinho com aquele preço
 function PrecosTabelas({
@@ -260,6 +483,7 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
 
   const [carrinhoAberto, setCarrinhoAberto] = useState(false);
   const [camera, setCamera] = useState(false);
+  const [verVendas, setVerVendas] = useState(false);
   const [idxSel, setIdxSel] = useState(0);
   const [carregando, setCarregando] = useState(true);
   const [salvando, setSalvando] = useState(false);
@@ -508,7 +732,15 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       {/* ===== Produtos ===== */}
       <section className="flex-1 min-w-0 bg-white rounded-2xl shadow-sm border border-slate-200 p-3 sm:p-4 flex flex-col gap-3 lg:min-h-0">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-base sm:text-lg font-black text-slate-800">🛒 Frente de Caixa</h2>
+          <h2 className="text-base sm:text-lg font-black text-slate-800 mr-auto">🛒 Frente de Caixa</h2>
+          <button
+            type="button"
+            onClick={() => setVerVendas(true)}
+            title="Vendas do dia: ver, reimprimir e cancelar"
+            className="text-xs font-bold border border-slate-300 rounded-lg px-2 py-1.5 bg-white cursor-pointer hover:bg-slate-50"
+          >
+            🧾 Vendas
+          </button>
           {tabelas.length > 0 && (
             <select
               value={tabelaId}
@@ -797,6 +1029,9 @@ export default function PdvModule({ loggedUser }: { loggedUser: any }) {
       )}
 
       {camera && <LeitorCamera aoLer={aoLerCamera} aoFechar={() => setCamera(false)} />}
+
+      {/* estoque na tela é recarregado depois de cancelar (o banco já devolveu) */}
+      {verVendas && <VendasDoDia nomeLoja={nomeLoja} aoFechar={() => setVerVendas(false)} aoCancelar={carregar} />}
 
       {/* Venda concluída */}
       {vendaFeita && (
