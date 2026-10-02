@@ -6,9 +6,10 @@ import { buscarTodos } from './buscarTodos';
 
 type Usuario = { id: string; email: string; nome: string; perfil: string; codigo_loja: string; loja_nome: string };
 
-type Rel = 'estoque' | 'vendas';
+type Rel = 'estoque' | 'vendas' | 'vendas_dia';
 const RELATORIOS: { id: Rel; rotulo: string }[] = [
   { id: 'estoque', rotulo: '📦 Estoque valorizado' },
+  { id: 'vendas_dia', rotulo: '🧾 Vendas do dia' },
   { id: 'vendas', rotulo: '🧑‍💼 Vendas por usuário' },
 ];
 
@@ -34,6 +35,7 @@ export default function RelatoriosModule({ loggedUser }: { loggedUser: Usuario }
         </ComSenha>
       )}
       {rel === 'vendas' && <VendasPorUsuario loggedUser={loggedUser} />}
+      {rel === 'vendas_dia' && <VendasDoDia loggedUser={loggedUser} />}
     </div>
   );
 }
@@ -645,6 +647,391 @@ function VendasPorUsuario({ loggedUser }: { loggedUser: Usuario }) {
       <p className="text-[11px] text-gray-400 print:hidden">
         Clique no nome do usuário para ver as vendas dele. Vendas canceladas não entram nos totais. Lucro real = venda − custo dos produtos − taxa
         do cartão (taxas em Configurações → Taxas de cartão).
+      </p>
+    </div>
+  );
+}
+
+// =====================================================================
+// VENDAS DO DIA (analítica: venda + produtos | simplificada: uma linha por venda) com totais por data
+// =====================================================================
+const diaDe = (s: string) => new Date(s).toLocaleDateString('sv-SE'); // AAAA-MM-DD no fuso local
+const dataBR = (d: string) => d.split('-').reverse().join('/');
+const hora = (s: string) => new Date(s).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+// condição de pagamento e prazo (crédito: uma parcela a cada 30 dias, igual ao Contas a receber)
+function condicao(v: any) {
+  const forma = FORMAS[v.forma_pagamento] || v.forma_pagamento || '—';
+  const n = Number(v.parcelas || 1);
+  if (v.forma_pagamento === 'cartao_credito') {
+    return {
+      condicao: n > 1 ? `${forma} ${n}x de ${brl(r2(Number(v.total) / n))}` : `${forma} 1x`,
+      prazo: Array.from({ length: n }, (_, i) => (i + 1) * 30).join('/') + ' dias',
+    };
+  }
+  return { condicao: forma, prazo: 'À vista' };
+}
+
+type TotaisVenda = { qtd: number; bruto: number; desconto: number; total: number; custo: number; taxa: number; lucro: number };
+const zeroTot = (): TotaisVenda => ({ qtd: 0, bruto: 0, desconto: 0, total: 0, custo: 0, taxa: 0, lucro: 0 });
+function somarVenda(t: TotaisVenda, v: any) {
+  t.qtd += 1;
+  t.bruto = r2(t.bruto + Number(v.subtotal ?? v.total ?? 0));
+  t.desconto = r2(t.desconto + Number(v.desconto || 0));
+  t.total = r2(t.total + Number(v.total || 0));
+  t.custo = r2(t.custo + Number(v.custo_total || 0));
+  t.taxa = r2(t.taxa + Number(v.taxa_cartao_valor || 0));
+  t.lucro = r2(t.lucro + lucroVenda(v));
+}
+
+function VendasDoDia({ loggedUser }: { loggedUser: Usuario }) {
+  const hoje = new Date().toLocaleDateString('sv-SE');
+  const [de, setDe] = useState(hoje);
+  const [ate, setAte] = useState(hoje);
+  const [modo, setModo] = useState<'simplificada' | 'analitica'>('simplificada');
+  const [verCanceladas, setVerCanceladas] = useState(false);
+  const [vendas, setVendas] = useState<any[]>([]);
+  const [itens, setItens] = useState<Record<string, any[]>>({});
+  const [clientes, setClientes] = useState<Record<string, string>>({});
+  const [skus, setSkus] = useState<Record<string, string>>({});
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      setCarregando(true);
+      setErro('');
+      const v = await buscarTodos(() =>
+        supabase
+          .from('vendas')
+          .select('*')
+          .eq('codigo_loja', loggedUser.codigo_loja)
+          .gte('created_at', new Date(de + 'T00:00:00').toISOString())
+          .lte('created_at', new Date(ate + 'T23:59:59.999').toISOString())
+          .order('created_at')
+          .order('id')
+      );
+      if (v.error) {
+        setErro('Erro ao carregar as vendas: ' + v.error.message);
+        setCarregando(false);
+        return;
+      }
+      const lista = v.data || [];
+      setVendas(lista);
+
+      // itens das vendas (em lotes, para não estourar o tamanho da consulta)
+      const ids = lista.map((x: any) => x.id);
+      const porVenda: Record<string, any[]> = {};
+      for (let i = 0; i < ids.length; i += 150) {
+        const lote = ids.slice(i, i + 150);
+        const r = await buscarTodos(() =>
+          supabase.from('venda_itens').select('venda_id, produto_id, nome, quantidade, preco_unitario, custo_unitario, subtotal').in('venda_id', lote).order('venda_id').order('id')
+        );
+        (r.data || []).forEach((it: any) => (porVenda[it.venda_id] ||= []).push(it));
+      }
+      setItens(porVenda);
+
+      // nomes dos clientes e códigos dos produtos
+      const idsCli = Array.from(new Set(lista.map((x: any) => x.cliente_id).filter(Boolean)));
+      const cli: Record<string, string> = {};
+      if (idsCli.length) {
+        const { data } = await supabase.from('clientes').select('*').in('id', idsCli);
+        ((data as any[]) || []).forEach((c) => (cli[c.id] = c.nome || c.razao_social || c.nome_fantasia || 'Cliente'));
+      }
+      setClientes(cli);
+      const idsProd = Array.from(new Set(Object.values(porVenda).flat().map((it: any) => it.produto_id).filter(Boolean)));
+      const sk: Record<string, string> = {};
+      for (let i = 0; i < idsProd.length; i += 150) {
+        const { data } = await supabase.from('produtos').select('id, sku').in('id', idsProd.slice(i, i + 150));
+        ((data as any[]) || []).forEach((p) => (sk[p.id] = p.sku));
+      }
+      setSkus(sk);
+      setCarregando(false);
+    })();
+  }, [loggedUser.codigo_loja, de, ate]);
+
+  const cancelada = (v: any) => !!v.cancelada_em || String(v.status || '').toLowerCase().startsWith('cancel');
+  const nomeCliente = (v: any) => (v.cliente_id && clientes[v.cliente_id]) || 'Consumidor';
+  // venda antiga sem custo_total gravado: soma o custo dos itens
+  const comCusto = (v: any) =>
+    v.custo_total != null ? v : { ...v, custo_total: r2((itens[v.id] || []).reduce((s, i) => s + Number(i.quantidade) * Number(i.custo_unitario || 0), 0)) };
+
+  // agrupado por data, com totais de cada dia e geral (canceladas não somam)
+  const dias = useMemo(() => {
+    const mapa = new Map<string, { dia: string; vendas: any[]; tot: TotaisVenda; canceladas: number }>();
+    for (const bruta of vendas) {
+      const v = comCusto(bruta);
+      const d = diaDe(v.created_at);
+      if (!mapa.has(d)) mapa.set(d, { dia: d, vendas: [], tot: zeroTot(), canceladas: 0 });
+      const g = mapa.get(d)!;
+      if (cancelada(v)) {
+        g.canceladas++;
+        if (!verCanceladas) continue;
+      } else somarVenda(g.tot, v);
+      g.vendas.push(v);
+    }
+    return Array.from(mapa.values());
+  }, [vendas, itens, verCanceladas]);
+
+  const geral = useMemo(() => {
+    const t = zeroTot();
+    dias.forEach((d) => d.vendas.filter((v) => !cancelada(v)).forEach((v) => somarVenda(t, v)));
+    return t;
+  }, [dias]);
+
+  const exportarCsv = () => {
+    const sep = ';';
+    const n = (x: number) => String(x).replace('.', ',');
+    const q = (c: any) => `"${String(c ?? '').replace(/"/g, '""')}"`;
+    const linhas: string[] = [];
+    if (modo === 'simplificada') {
+      linhas.push(['Data', 'Hora', 'Venda', 'Cliente', 'Vendedor', 'Bruto', 'Desconto', 'Total', 'Condição', 'Prazo', 'Custo', 'Taxa cartão', 'Lucro', 'Situação'].map(q).join(sep));
+      dias.forEach((d) =>
+        d.vendas.forEach((v) => {
+          const c = condicao(v);
+          linhas.push(
+            [dataBR(d.dia), hora(v.created_at), v.numero, nomeCliente(v), v.operador || '', n(Number(v.subtotal ?? v.total)), n(Number(v.desconto || 0)), n(Number(v.total)), c.condicao, c.prazo, n(Number(v.custo_total || 0)), n(Number(v.taxa_cartao_valor || 0)), n(lucroVenda(v)), cancelada(v) ? 'Cancelada' : '']
+              .map(q)
+              .join(sep)
+          );
+        })
+      );
+    } else {
+      linhas.push(['Data', 'Hora', 'Venda', 'Cliente', 'Condição', 'Código', 'Produto', 'Qtd', 'Preço', 'Subtotal', 'Custo unit.', 'Custo total', 'Lucro item', 'Situação'].map(q).join(sep));
+      dias.forEach((d) =>
+        d.vendas.forEach((v) =>
+          (itens[v.id] || []).forEach((i) => {
+            const custo = r2(Number(i.quantidade) * Number(i.custo_unitario || 0));
+            linhas.push(
+              [dataBR(d.dia), hora(v.created_at), v.numero, nomeCliente(v), condicao(v).condicao, skus[i.produto_id] || '', i.nome, n(Number(i.quantidade)), n(Number(i.preco_unitario)), n(Number(i.subtotal)), n(Number(i.custo_unitario || 0)), n(custo), n(r2(Number(i.subtotal) - custo)), cancelada(v) ? 'Cancelada' : '']
+                .map(q)
+                .join(sep)
+            );
+          })
+        )
+      );
+    }
+    const blob = new Blob(['﻿' + linhas.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `vendas-${modo}-${de}${ate !== de ? '-a-' + ate : ''}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const periodo = de === ate ? dataBR(de) : `${dataBR(de)} a ${dataBR(ate)}`;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 text-sm shadow-sm print:hidden">
+        de <input type="date" value={de} onChange={(e) => setDe(e.target.value)} className="rounded border px-2 py-1" />
+        até <input type="date" value={ate} onChange={(e) => setAte(e.target.value)} className="rounded border px-2 py-1" />
+        <div className="flex overflow-hidden rounded-lg border">
+          {(
+            [
+              ['simplificada', 'Simplificada'],
+              ['analitica', 'Analítica'],
+            ] as const
+          ).map(([id, rot]) => (
+            <button key={id} onClick={() => setModo(id)} className={`px-3 py-1 ${modo === id ? 'bg-gray-800 text-white' : 'hover:bg-gray-50'}`}>
+              {rot}
+            </button>
+          ))}
+        </div>
+        <label className="flex items-center gap-1 text-xs text-gray-600">
+          <input type="checkbox" checked={verCanceladas} onChange={(e) => setVerCanceladas(e.target.checked)} /> mostrar canceladas
+        </label>
+        <div className="flex-1" />
+        <button onClick={exportarCsv} disabled={!vendas.length} className="rounded-lg border px-3 py-1 hover:bg-gray-50 disabled:opacity-40">
+          ⬇ Planilha
+        </button>
+        <button onClick={() => window.print()} className="rounded-lg border px-3 py-1 hover:bg-gray-50">
+          🖨 Imprimir
+        </button>
+      </div>
+      {erro && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{erro}</p>}
+
+      <div className="rounded-xl bg-white p-4 shadow-sm">
+        <h3 className="text-lg font-bold text-gray-800">Vendas {modo === 'analitica' ? '— analítica' : '— simplificada'}</h3>
+        <p className="mb-3 text-xs text-gray-500">
+          {loggedUser.loja_nome} · {periodo}
+        </p>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <Quadro titulo="Vendas" valor={String(geral.qtd)} />
+          <Quadro titulo="Total vendido" valor={brl(geral.total)} destaque="text-blue-800" sub={geral.desconto ? `descontos ${brl(geral.desconto)}` : ''} />
+          <Quadro titulo="Custo" valor={brl(geral.custo)} />
+          <Quadro titulo="Taxas de cartão" valor={brl(geral.taxa)} destaque={geral.taxa ? 'text-red-700' : undefined} />
+          <Quadro
+            titulo="Lucro"
+            valor={brl(geral.lucro)}
+            sub={geral.total > 0 ? `${pctFmt(r2((geral.lucro / geral.total) * 100))} do vendido` : ''}
+            destaque={geral.lucro >= 0 ? 'text-green-700' : 'text-red-700'}
+          />
+          <Quadro titulo="Ticket médio" valor={brl(geral.qtd ? r2(geral.total / geral.qtd) : 0)} />
+        </div>
+      </div>
+
+      {carregando ? (
+        <p className="rounded-xl bg-white p-6 text-center text-sm text-gray-500 shadow-sm">Carregando…</p>
+      ) : !dias.length ? (
+        <p className="rounded-xl bg-white p-6 text-center text-sm text-gray-500 shadow-sm">Nenhuma venda no período.</p>
+      ) : (
+        dias.map((d) => (
+          <div key={d.dia} className="overflow-x-auto rounded-xl bg-white shadow-sm print:break-inside-avoid">
+            <div className="flex items-center gap-2 border-b bg-gray-50 px-3 py-2 text-sm">
+              <b className="mr-auto text-gray-800">📅 {dataBR(d.dia)}</b>
+              <span className="text-gray-600">{d.tot.qtd} venda(s)</span>
+              {d.canceladas > 0 && <span className="text-red-600">· {d.canceladas} cancelada(s)</span>}
+            </div>
+
+            {modo === 'simplificada' ? (
+              <table className="w-full text-sm">
+                <thead className="border-b text-left text-[11px] uppercase text-gray-600">
+                  <tr>
+                    <th className="p-2">Hora</th>
+                    <th className="p-2">Venda</th>
+                    <th className="p-2">Cliente</th>
+                    <th className="p-2 text-right">Bruto</th>
+                    <th className="p-2 text-right">Desc.</th>
+                    <th className="p-2 text-right">Total</th>
+                    <th className="p-2">Condição</th>
+                    <th className="p-2">Prazo</th>
+                    <th className="p-2 text-right">Custo</th>
+                    <th className="p-2 text-right">Taxa</th>
+                    <th className="p-2 text-right">Lucro</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {d.vendas.map((v) => {
+                    const c = condicao(v);
+                    const cancel = cancelada(v);
+                    const lucro = lucroVenda(v);
+                    return (
+                      <tr key={v.id} className={cancel ? 'text-gray-400 line-through' : ''}>
+                        <td className="p-2 whitespace-nowrap">{hora(v.created_at)}</td>
+                        <td className="p-2 whitespace-nowrap">
+                          nº {v.numero}
+                          {cancel && <span className="ml-1 rounded bg-red-600 px-1 text-[10px] font-bold text-white no-underline">CANC.</span>}
+                        </td>
+                        <td className="p-2">{nomeCliente(v)}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{brl(Number(v.subtotal ?? v.total))}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{Number(v.desconto) ? brl(Number(v.desconto)) : '—'}</td>
+                        <td className="p-2 text-right whitespace-nowrap font-semibold">{brl(Number(v.total))}</td>
+                        <td className="p-2 whitespace-nowrap">{c.condicao}</td>
+                        <td className="p-2 whitespace-nowrap">{c.prazo}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{brl(Number(v.custo_total || 0))}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{Number(v.taxa_cartao_valor) ? brl(Number(v.taxa_cartao_valor)) : '—'}</td>
+                        <td className={`p-2 text-right whitespace-nowrap ${cancel ? '' : lucro < 0 ? 'text-red-600' : 'text-green-700'}`}>{brl(lucro)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="border-t-2 bg-gray-100 font-bold">
+                  <tr>
+                    <td className="p-2" colSpan={3}>
+                      Total {dataBR(d.dia)}
+                    </td>
+                    <td className="p-2 text-right whitespace-nowrap">{brl(d.tot.bruto)}</td>
+                    <td className="p-2 text-right whitespace-nowrap">{brl(d.tot.desconto)}</td>
+                    <td className="p-2 text-right whitespace-nowrap text-blue-800">{brl(d.tot.total)}</td>
+                    <td colSpan={2} />
+                    <td className="p-2 text-right whitespace-nowrap">{brl(d.tot.custo)}</td>
+                    <td className="p-2 text-right whitespace-nowrap">{brl(d.tot.taxa)}</td>
+                    <td className="p-2 text-right whitespace-nowrap text-green-700">{brl(d.tot.lucro)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            ) : (
+              <div className="divide-y">
+                {d.vendas.map((v) => {
+                  const c = condicao(v);
+                  const cancel = cancelada(v);
+                  return (
+                    <div key={v.id} className={`p-3 text-sm ${cancel ? 'opacity-50' : ''}`}>
+                      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                        <b className="text-gray-800">
+                          Venda nº {v.numero} · {hora(v.created_at)}
+                        </b>
+                        {cancel && (
+                          <span className="rounded bg-red-600 px-1.5 text-[10px] font-bold text-white">
+                            CANCELADA{v.motivo_cancelamento ? ` · ${v.motivo_cancelamento}` : ''}
+                          </span>
+                        )}
+                        <span className="text-gray-600">Cliente: {nomeCliente(v)}</span>
+                        {v.operador && <span className="text-gray-600">Vendedor: {v.operador}</span>}
+                        <span className="text-gray-600">
+                          {c.condicao} · {c.prazo}
+                        </span>
+                      </div>
+                      <table className="mt-1 w-full text-xs">
+                        <thead className="text-left text-[10px] uppercase text-gray-500">
+                          <tr>
+                            <th className="py-1 pr-2">Código</th>
+                            <th className="py-1 pr-2">Produto</th>
+                            <th className="py-1 pr-2 text-right">Qtd</th>
+                            <th className="py-1 pr-2 text-right">Preço</th>
+                            <th className="py-1 pr-2 text-right">Subtotal</th>
+                            <th className="py-1 pr-2 text-right">Custo</th>
+                            <th className="py-1 text-right">Lucro</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(itens[v.id] || []).map((i, k) => {
+                            const custo = r2(Number(i.quantidade) * Number(i.custo_unitario || 0));
+                            const lucro = r2(Number(i.subtotal) - custo);
+                            return (
+                              <tr key={k} className="border-t border-gray-100">
+                                <td className="py-1 pr-2 text-gray-500">{skus[i.produto_id] || ''}</td>
+                                <td className="py-1 pr-2 text-gray-800">{i.nome}</td>
+                                <td className="py-1 pr-2 text-right">{qtdFmt(Number(i.quantidade))}</td>
+                                <td className="py-1 pr-2 text-right whitespace-nowrap">{brl(Number(i.preco_unitario))}</td>
+                                <td className="py-1 pr-2 text-right whitespace-nowrap">{brl(Number(i.subtotal))}</td>
+                                <td className="py-1 pr-2 text-right whitespace-nowrap">{brl(custo)}</td>
+                                <td className={`py-1 text-right whitespace-nowrap ${lucro < 0 ? 'text-red-600' : 'text-green-700'}`}>{brl(lucro)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      <div className="mt-1 flex flex-wrap justify-end gap-x-4 text-xs text-gray-700">
+                        <span>Bruto {brl(Number(v.subtotal ?? v.total))}</span>
+                        {Number(v.desconto) > 0 && <span>Desconto − {brl(Number(v.desconto))}</span>}
+                        <b>Total {brl(Number(v.total))}</b>
+                        <span>Custo {brl(Number(v.custo_total || 0))}</span>
+                        {Number(v.taxa_cartao_valor) > 0 && <span className="text-red-700">Taxa cartão − {brl(Number(v.taxa_cartao_valor))}</span>}
+                        <b className={lucroVenda(v) < 0 ? 'text-red-600' : 'text-green-700'}>Lucro {brl(lucroVenda(v))}</b>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="flex flex-wrap justify-end gap-x-4 bg-gray-100 px-3 py-2 text-sm font-bold">
+                  <span>Total {dataBR(d.dia)}:</span>
+                  <span className="text-blue-800">{brl(d.tot.total)}</span>
+                  <span>Custo {brl(d.tot.custo)}</span>
+                  <span>Taxas {brl(d.tot.taxa)}</span>
+                  <span className="text-green-700">Lucro {brl(d.tot.lucro)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        ))
+      )}
+
+      {dias.length > 1 && (
+        <div className="flex flex-wrap justify-end gap-x-4 rounded-xl bg-gray-800 px-4 py-3 text-sm font-bold text-white">
+          <span>TOTAL DO PERÍODO:</span>
+          <span>{geral.qtd} venda(s)</span>
+          <span>Bruto {brl(geral.bruto)}</span>
+          <span>Desc. {brl(geral.desconto)}</span>
+          <span className="text-amber-300">Total {brl(geral.total)}</span>
+          <span>Custo {brl(geral.custo)}</span>
+          <span>Taxas {brl(geral.taxa)}</span>
+          <span className="text-green-300">Lucro {brl(geral.lucro)}</span>
+        </div>
+      )}
+      <p className="text-[11px] text-gray-400 print:hidden">
+        Lucro = total da venda − custo dos produtos − taxa do cartão. Custo = custo do produto no momento da venda. Vendas canceladas não entram nos totais.
+        Prazo do crédito: uma parcela a cada 30 dias.
       </p>
     </div>
   );
